@@ -1,0 +1,28 @@
+# JavaScript dependencies and build output
+node_modules/
+dist/
+.vite/
+
+# Local Python environment and caches
+.conda-env/
+__pycache__/
+*.py[cod]
+
+# Large local genomics references and generated indexes
+index/
+reference/
+
+# Local environment files and credentials
+.env
+.env.*
+!.env.example
+
+# Generated previews, backups, and logs
+*_preview.txt
+*.orig
+*.log
+
+# Editor and OS metadata
+.DS_Store
+.idea/
+.vscode/
