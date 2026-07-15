@@ -14,18 +14,31 @@ function Chip({ active, disabled, title, onClick, children }) {
   )
 }
 
-export function AnnotationControls({ opts, onChange, biotypes, className = '' }) {
+export function AnnotationControls({
+  opts, onChange, biotypes, status, assembly, className = '',
+}) {
   const setLevel = (level) => onChange({
     ...opts,
     featureLevels: { ...opts.featureLevels, [level]: !opts.featureLevels[level] },
   })
+  const setTrack = (track) => onChange({ ...opts, [track]: !opts[track] })
+  const gnomadOk = !!status?.gnomad?.assemblies?.[assembly]
+  const clinvarOk = !!status?.clinvar?.available?.[assembly]
 
   return (
     <div className={`frgroup annotationsgroup${className ? ` ${className}` : ''}`}>
       <span className="frlabel">Annotations</span>
       <Chip active={opts.featureLevels.gene} onClick={() => setLevel('gene')}>Genes</Chip>
       <Chip active={opts.featureLevels.transcript} onClick={() => setLevel('transcript')}>Transcripts</Chip>
-      <BiotypeMenu biotypes={biotypes} selected={opts.biotypes} onChange={(b) => onChange({ ...opts, biotypes: b })} />
+      {opts.featureLevels.transcript && (
+        <BiotypeMenu biotypes={biotypes} selected={opts.biotypes} onChange={(b) => onChange({ ...opts, biotypes: b })} />
+      )}
+      <Chip active={opts.gnomad} disabled={!gnomadOk}
+        title={gnomadOk ? 'Show or hide gnomAD population variants' : 'gnomAD annotations are unavailable for this genome'}
+        onClick={() => setTrack('gnomad')}>gnomAD</Chip>
+      <Chip active={opts.clinvar} disabled={!clinvarOk}
+        title={clinvarOk ? 'Show or hide ClinVar clinical annotations' : 'ClinVar annotations are unavailable for this genome'}
+        onClick={() => setTrack('clinvar')}>ClinVar</Chip>
     </div>
   )
 }
@@ -35,10 +48,6 @@ export default function FeatureRibbon({
   exonNav, navigationDisabled, onSnapExon, onPreviousExon, onNextExon,
   onPanLeft, onPanRight, overviewTargetRef, locusOverview,
 }) {
-  // Track controls are temporarily hidden until the variant sources support
-  // the desired product behavior. Keep these checks here for easy restoration.
-  // const gnomadOk = status?.gnomad?.available && assembly === status?.gnomad?.assembly
-  // const clinvarOk = !!status?.clinvar?.available?.[assembly]
   const currentExon = exonNav?.exons?.[exonNav.index]
   const exonLabel = currentExon
     ? `Exon ${currentExon.rank ?? exonNav.index + 1} / ${exonNav.exons.length}`
@@ -100,22 +109,6 @@ export default function FeatureRibbon({
       )}
       <div className="overviewslot" ref={overviewTargetRef} />
 
-
-      {/* Track buttons temporarily hidden. Codons now render automatically
-          whenever a CDS frame is available; gnomAD and ClinVar remain off.
-      <div className="frgroup">
-        <span className="frlabel">Tracks</span>
-        <Chip active={opts.codons && frameAvailable} disabled={!frameAvailable}
-          title={frameAvailable ? 'Show/hide codons and edited amino-acid consequences' : 'No CDS overlaps this sequence window'}
-          onClick={() => setTrack('codons')}>Codons / AA</Chip>
-        <Chip active={opts.gnomad} disabled={!gnomadOk}
-          title={gnomadOk ? 'Show gnomAD variants' : 'gnomAD data not available in this environment'}
-          onClick={() => setTrack('gnomad')}>gnomAD</Chip>
-        <Chip active={opts.clinvar} disabled={!clinvarOk}
-          title={clinvarOk ? 'Show ClinVar clinical significance' : 'ClinVar data not available in this environment'}
-          onClick={() => setTrack('clinvar')}>ClinVar</Chip>
-      </div>
-      */}
     </div>
   )
 }

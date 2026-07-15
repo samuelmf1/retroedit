@@ -24,33 +24,47 @@ function featureTooltip(f) {
   return lines.join('\n')
 }
 
+function clinvarCategory(v) {
+  const significance = (v.clnsig || '').toLowerCase()
+  if (/conflicting/.test(significance)) return 'conflicting'
+  if (/pathogenic/.test(significance) && !/benign/.test(significance)) return 'pathogenic'
+  if (/uncertain/.test(significance)) return 'uncertain'
+  if (/benign/.test(significance) && !/pathogenic/.test(significance)) return 'benign'
+  if (/drug response|risk factor|association|protective/.test(significance)) return 'association'
+  return 'other'
+}
+
 function variantTooltip(v) {
   if (v.source === 'clinvar') {
     return [
-      `${v.ref}>${v.alt}${v.id ? ` (${v.id})` : ''}`,
-      v.clnsig && `ClinVar: ${v.clnsig}`,
-      v.clndn && v.clndn,
+      `${v.ref} → ${v.alt}${v.id ? ` · ClinVar Variation ID ${v.id}` : ''}`,
+      `Position: ${Number(v.pos).toLocaleString()}`,
+      v.clnsig ? `Clinical significance: ${v.clnsig}` : 'Clinical significance: not provided',
+      v.gold_stars != null && `Review evidence: ${v.gold_stars} star${v.gold_stars === 1 ? '' : 's'}`,
+      v.review_status && `Review status: ${v.review_status}`,
+      v.clndn && `Condition: ${v.clndn}`,
     ].filter(Boolean).join('\n')
   }
+  const common = (v.af ?? 0) >= 0.01
   return [
-    `${v.ref}>${v.alt}${v.id ? ` (${v.id})` : ''}`,
-    `gnomAD MAF ${fmtAf(v.af)}`,
-    v.grpmax && `grpmax ${v.grpmax} ${fmtAf(v.af_grpmax)}`,
-    v.nhomalt != null && `${v.nhomalt} homozygotes`,
+    `${v.ref} → ${v.alt}${v.id ? ` · ${v.id}` : ''}`,
+    `Position: ${Number(v.pos).toLocaleString()}`,
+    `gnomAD alternate allele frequency: ${fmtAf(v.af)}`,
+    common && 'Concerning for guide design: frequency is ≥1%; cells carrying the alternate allele may reduce sgRNA annealing.',
+    v.grpmax && `Highest ancestry-group frequency: ${v.grpmax} ${fmtAf(v.af_grpmax)}`,
+    v.nhomalt != null && `Observed homozygotes: ${v.nhomalt.toLocaleString()}`,
   ].filter(Boolean).join('\n')
 }
 
 function fmtAf(af) {
-  if (af == null) return 'NA'
-  if (af === 0) return '0'
-  return af < 0.001 ? af.toExponential(1) : af.toFixed(4)
+  if (af == null) return 'not available'
+  if (af === 0) return '0%'
+  if (af < 0.0001) return `${(af * 100).toExponential(1)}%`
+  return `${(af * 100).toFixed(af < 0.01 ? 3 : 2)}%`
 }
 
 function variantSeverity(v) {
-  if (v.source === 'clinvar') {
-    return /pathogenic/i.test(v.clnsig || '') && !/conflicting|benign/i.test(v.clnsig || '')
-      ? 'path' : 'other'
-  }
+  if (v.source === 'clinvar') return `clin-${clinvarCategory(v)}`
   return (v.af ?? 0) >= 0.01 ? 'common' : 'rare'
 }
 
@@ -173,6 +187,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
   const [bpr, setBpr] = useState(60)
   const [overviewDragPercent, setOverviewDragPercent] = useState(null)
   const [overviewResizeRange, setOverviewResizeRange] = useState(null)
+  const [variantTip, setVariantTip] = useState(null)
   const dragging = useRef(false)
   const overviewDragging = useRef(false)
   const overviewResizing = useRef(null)
@@ -680,22 +695,32 @@ const SequenceViewer = forwardRef(function SequenceViewer(
 
     rows.push(
       <div key={r} className="row" style={{ position: 'absolute', top: layout.offsets[r], height: layout.heights[r], left: GUTTER }}>
-        {varRow && (
-          <div className="vartrack" style={{ height: VAR_H, width: bpr * CHAR_W }}>
-            {varRow.map((v) => (
-              <div key={`${v.pos}${v.alt}${v.source}`}
-                className={`vmark ${v.source} ${variantSeverity(v)}`}
-                style={{ left: (v.col - rowStart) * CHAR_W }}
-                title={variantTooltip(v)} />
-            ))}
-          </div>
-        )}
         <div className="lanes" style={{ height: fwdLanes * LANE_H }}>
           {layout.fwdRows[r].map(renderGuide)}
         </div>
 
         {guideCells && guideRibbon.strand === '+' && renderGuideRibbon()}
         {donorCells && donorRibbon.orientation === 'sense' && renderDonorRibbon()}
+        {varRow && (
+          <div className="vartrack" style={{ height: VAR_H, width: bpr * CHAR_W }}>
+            {varRow.map((v) => (
+              <div key={`${v.pos}${v.alt}${v.source}`}
+                className={`vmark ${v.source} ${variantSeverity(v)}`}
+                style={{ left: (v.col - rowStart) * CHAR_W }}
+                role="img"
+                tabIndex={0}
+                aria-label={variantTooltip(v).replaceAll('\n', '. ')}
+                onPointerEnter={(event) => setVariantTip({ v, x: event.clientX, y: event.clientY })}
+                onPointerMove={(event) => setVariantTip({ v, x: event.clientX, y: event.clientY })}
+                onPointerLeave={() => setVariantTip(null)}
+                onFocus={(event) => {
+                  const box = event.currentTarget.getBoundingClientRect()
+                  setVariantTip({ v, x: box.left + box.width / 2, y: box.bottom })
+                }}
+                onBlur={() => setVariantTip(null)} />
+            ))}
+          </div>
+        )}
 
         <div
           className="strands"
@@ -867,6 +892,21 @@ const SequenceViewer = forwardRef(function SequenceViewer(
           </span>
         </div>,
         overviewTarget,
+      )}
+      {variantTip && createPortal(
+        <div
+          className={`varianttip ${variantTip.v.source} ${variantSeverity(variantTip.v)}`}
+          role="tooltip"
+          style={{
+            left: Math.max(8, Math.min(variantTip.x + 12, window.innerWidth - 330)),
+            top: Math.max(8, Math.min(variantTip.y + 14, window.innerHeight - 170)),
+          }}
+        >
+          {variantTooltip(variantTip.v).split('\n').map((line, index) => (
+            <span key={index} className={index === 0 ? 'varianttip-title' : ''}>{line}</span>
+          ))}
+        </div>,
+        document.body,
       )}
       {selectionSummary && (
         <div className="selectionbar" role="status" aria-live="polite">

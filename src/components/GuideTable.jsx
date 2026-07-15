@@ -99,7 +99,7 @@ export default function GuideTable({
                 <tr
                   key={g.id}
                   ref={g.id === selectedGuideId ? selectedRowRef : null}
-                  className={`${g.id === selectedGuideId ? 'selected' : ''}${g.metricsReady ? '' : ' metrics-pending'}`}
+                  className={`${g.id === selectedGuideId ? 'selected' : ''}${g.metricsReady ? '' : ' metrics-pending'}${variantWarn?.[g.id] ? ' common-variant' : ''}`}
                   onClick={() => onSelect(g.id)}
                 >
                   <td className="chkcol" title={g.metricsReady ? 'Select this guide for export' : 'Preview available. Export selection unlocks when this guide’s metrics finish.'} onClick={(e) => e.stopPropagation()}>
@@ -120,7 +120,9 @@ export default function GuideTable({
                       <><br /><span className="flag u6" title="TTTT is a U6 Pol III termination signal">T-homopolymer U6 early terminator</span></>
                     )}
                     {variantWarn?.[g.id] && (
-                      <span className="flag var" title={variantWarnTitle(variantWarn[g.id])}>SNP</span>
+                      <><br /><span className="flag var" title={variantWarnTitle(variantWarn[g.id])}>
+                        ⚠ gnomAD AF ≥1%{variantWarn[g.id].count > 1 ? ` (${variantWarn[g.id].count})` : ''}
+                      </span></>
                     )}
                   </td>
                   <td className="num">{scoreCell(g, scorable, rs3Available)}</td>
@@ -211,8 +213,14 @@ function scoreCell(g, scorable, rs3Available) {
 }
 
 function variantWarnTitle(w) {
-  return `Overlaps a common variant (${w.id || 'gnomAD'}, MAF ${(w.af * 100).toFixed(1)}%)` +
-    `${w.inPam ? ' in the PAM' : ' in the spacer'} — a mismatch here can lower cutting efficiency.`
+  const variants = w.variants?.length ? w.variants : [w]
+  const details = variants.slice(0, 4).map((v) => (
+    `${v.ref || '?'}>${v.alt || '?'} at ${Number(v.pos).toLocaleString()} ` +
+    `(${(v.af * 100).toFixed(2)}% AF, ${v.inPam ? 'PAM' : 'spacer'}${v.id ? `, ${v.id}` : ''})`
+  )).join('\n')
+  const more = variants.length > 4 ? `\n…and ${variants.length - 4} more.` : ''
+  return `Warning: ${variants.length} gnomAD variant${variants.length === 1 ? '' : 's'} with alternate allele frequency ≥1% overlap this guide. ` +
+    `Cells carrying an alternate allele may have reduced sgRNA annealing or cutting.\n${details}${more}`
 }
 
 function offCell(g, offAvailable) {

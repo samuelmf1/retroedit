@@ -25,7 +25,7 @@ export function EditActions({
 
 export default function EditBar({
   editList, selRange, edits, canUndo, canRedo, onUndo, onRedo, onRevert,
-  annotationOptions, onAnnotationChange, biotypes, inputKey, loadedInputKey,
+  annotationOptions, onAnnotationChange, biotypes, annotationStatus, assembly, inputKey, loadedInputKey,
 }) {
   const [hasEditedForInput, setHasEditedForInput] = useState(false)
   const inputChanged = inputKey !== loadedInputKey
@@ -71,6 +71,8 @@ export default function EditBar({
         opts={annotationOptions}
         onChange={onAnnotationChange}
         biotypes={biotypes}
+        status={annotationStatus}
+        assembly={assembly}
         className="editannotations"
       />
     </div>

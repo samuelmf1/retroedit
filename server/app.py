@@ -83,7 +83,7 @@ async def limit_expensive_request_bodies(request: Request, call_next):
             return await call_next(request)
     return await call_next(request)
 
-# gnomAD / ClinVar / off-target endpoints (gated on reference-file presence).
+# gnomAD, ClinVar, annotation, and off-target endpoints.
 try:
     from .genomics import router as genomics_router
 except ImportError:

@@ -1,24 +1,26 @@
-"""Genomics data service: gnomAD / ClinVar variants and genome-wide off-targets.
+"""Genomics service for variant annotations and genome-wide off-targets.
 
-Everything here is gated on the presence of large reference files that live in
-the deployment environment (and are absent on a laptop). Each capability reports
-availability through /api/genomics/status, and endpoints degrade to
-`{available: false}` rather than erroring when their data is missing, so the
-front end can simply hide features that are not usable.
-
-Paths are configurable with env vars; the defaults match the cluster layout
-recorded in gnomad_preview.txt / clinvar_preview.txt.
+Local indexed gnomAD and ClinVar VCFs are preferred when configured. When those
+large files are absent, human regional annotations fall back to the official
+gnomAD GraphQL API. Successful remote regions are cached and shared by both
+optional tracks. Every capability reports availability through
+``/api/genomics/status`` and degrades to ``{available: false}`` on failure.
 """
 
 from __future__ import annotations
 
 import os
+import json
+import threading
+import time
 import re
 import shutil
 import subprocess
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -37,6 +39,15 @@ CLINVAR_DIR = Path(
         "/gpfs/commons/datasets/variants/clinvar/clinvar/pub/clinvar",
     )
 )
+GNOMAD_API_URL = os.environ.get("GNOMAD_API_URL", "https://gnomad.broadinstitute.org/api").strip()
+GNOMAD_API_TIMEOUT = float(os.environ.get("GNOMAD_API_TIMEOUT", "15"))
+GNOMAD_API_CACHE_TTL = int(os.environ.get("GNOMAD_API_CACHE_TTL", "900"))
+GNOMAD_API_CACHE_SIZE = int(os.environ.get("GNOMAD_API_CACHE_SIZE", "256"))
+GNOMAD_REMOTE_DATASETS = {
+    "GRCh38": "gnomad_r4",
+    "GRCh37": "gnomad_r2_1",
+}
+
 # Reference genomes, prebuilt indexes, and Linux-native command-line tools.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 REFERENCE_DIR = Path(os.environ.get("REFERENCE_DIR", PROJECT_ROOT / "reference")).resolve()
@@ -152,14 +163,104 @@ def _num(value: Optional[str]) -> Optional[float]:
         return None
 
 
+_REMOTE_VARIANT_QUERY = """
+query RetroEditRegion(
+  $chrom: String!, $start: Int!, $stop: Int!,
+  $referenceGenome: ReferenceGenomeId!, $dataset: DatasetId!
+) {
+  region(
+    chrom: $chrom, start: $start, stop: $stop,
+    reference_genome: $referenceGenome
+  ) {
+    variants(dataset: $dataset) {
+      variant_id pos ref alt rsids
+      joint { ac an homozygote_count filters }
+      exome { ac an homozygote_count filters }
+      genome { ac an homozygote_count filters }
+    }
+    clinvar_variants {
+      variant_id pos ref alt clinical_significance
+      clinvar_variation_id gold_stars review_status
+    }
+  }
+}
+"""
+_remote_variant_cache: Dict[tuple, tuple[float, dict]] = {}
+_remote_variant_cache_lock = threading.Lock()
+
+
+def _remote_region_variants(assembly: str, chrom: str, start: int, end: int) -> dict:
+    dataset = GNOMAD_REMOTE_DATASETS.get(assembly)
+    if not GNOMAD_API_URL or not dataset:
+        raise RuntimeError(f"remote variant annotations do not support {assembly}")
+    normalized_chrom = chrom.replace("chr", "")
+    key = (assembly, normalized_chrom, start, end)
+    now = time.monotonic()
+
+    # Hold the lock through the request so simultaneous gnomAD and ClinVar track
+    # requests for one interval collapse into a single upstream API call.
+    with _remote_variant_cache_lock:
+        cached = _remote_variant_cache.get(key)
+        if cached and now - cached[0] < GNOMAD_API_CACHE_TTL:
+            return cached[1]
+
+        body = json.dumps({
+            "query": _REMOTE_VARIANT_QUERY,
+            "variables": {
+                "chrom": normalized_chrom,
+                "start": start,
+                "stop": end,
+                "referenceGenome": assembly,
+                "dataset": dataset,
+            },
+        }).encode("utf-8")
+        request = Request(
+            GNOMAD_API_URL,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "RetroEdit/1.0",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=GNOMAD_API_TIMEOUT) as response:
+                payload = json.load(response)
+        except HTTPError as exc:
+            detail = exc.read(500).decode("utf-8", errors="replace")
+            raise RuntimeError(f"gnomAD API returned {exc.code}: {detail}") from exc
+        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"gnomAD API request failed: {exc}") from exc
+
+        if payload.get("errors"):
+            message = payload["errors"][0].get("message", "GraphQL query failed")
+            raise RuntimeError(f"gnomAD API error: {message}")
+        region = payload.get("data", {}).get("region")
+        if region is None:
+            raise RuntimeError("gnomAD API returned no region data")
+
+        _remote_variant_cache[key] = (now, region)
+        while len(_remote_variant_cache) > max(1, GNOMAD_API_CACHE_SIZE):
+            _remote_variant_cache.pop(next(iter(_remote_variant_cache)))
+        return region
+
 # ---- status ----------------------------------------------------------------
 
 @router.get("/status")
 def status() -> dict:
-    gnomad_ok = bool(TABIX) and GNOMAD_DIR.exists() and any(
+    local_gnomad = bool(TABIX) and GNOMAD_DIR.exists() and any(
         _gnomad_path(c).exists() for c in ("1", "13", "17")
     )
-    clinvar = {a: (bool(TABIX) and p.exists()) for a, p in CLINVAR_VCF.items()}
+    remote_variants = bool(GNOMAD_API_URL)
+    gnomad_assemblies = {
+        assembly: remote_variants or (assembly == "GRCh38" and local_gnomad)
+        for assembly in GNOMAD_REMOTE_DATASETS
+    }
+    clinvar = {
+        assembly: (bool(TABIX) and path.exists()) or remote_variants
+        for assembly, path in CLINVAR_VCF.items()
+    }
     genomes = {a: p.exists() for a, p in GENOME_FASTA.items()}
     annotations = {
         a: bool(TABIX) and p.exists() and Path(str(p) + ".tbi").exists()
@@ -172,8 +273,12 @@ def status() -> dict:
     return {
         "tabix": bool(TABIX),
         "bowtie": bool(BOWTIE),
-        "gnomad": {"available": gnomad_ok, "assembly": "GRCh38"},
-        "clinvar": {"available": clinvar},
+        "gnomad": {
+            "available": any(gnomad_assemblies.values()),
+            "assemblies": gnomad_assemblies,
+            "remote": remote_variants,
+        },
+        "clinvar": {"available": clinvar, "remote": remote_variants},
         "genomes": genomes,
         "annotations": annotations,
         "offtarget": {"tool": bool(BOWTIE), "assemblies": offtarget},
@@ -193,6 +298,8 @@ class Variant(BaseModel):
     nhomalt: Optional[int] = None
     clnsig: Optional[str] = None        # ClinVar clinical significance
     clndn: Optional[str] = None         # ClinVar disease name
+    review_status: Optional[str] = None
+    gold_stars: Optional[int] = None
     source: str = "gnomad"
 
 
@@ -262,16 +369,102 @@ def _clinvar_variants(assembly: str, chrom: str, start: int, end: int) -> Varian
                            truncated=len(rows) >= 5000)
 
 
+def _remote_gnomad_variants(
+    assembly: str, chrom: str, start: int, end: int
+) -> VariantResponse:
+    try:
+        rows = _remote_region_variants(assembly, chrom, start, end).get("variants", [])
+    except RuntimeError as exc:
+        return VariantResponse(available=False, detail=str(exc))
+
+    variants = []
+    for item in rows:
+        joint = item.get("joint")
+        if joint:
+            ac = int(joint.get("ac") or 0)
+            an = int(joint.get("an") or 0)
+            nhomalt = int(joint.get("homozygote_count") or 0)
+            filters = set(joint.get("filters") or [])
+        else:
+            parts = [part for part in (item.get("exome"), item.get("genome")) if part]
+            ac = sum(int(part.get("ac") or 0) for part in parts)
+            an = sum(int(part.get("an") or 0) for part in parts)
+            nhomalt = sum(int(part.get("homozygote_count") or 0) for part in parts)
+            filters = {value for part in parts for value in (part.get("filters") or [])}
+        if ac <= 0 or an <= 0 or filters:
+            continue
+        rsids = item.get("rsids") or []
+        variants.append(Variant(
+            pos=int(item["pos"]),
+            ref=item["ref"],
+            alt=item["alt"],
+            id=rsids[0] if rsids else item.get("variant_id"),
+            af=min(1.0, ac / an),
+            nhomalt=nhomalt,
+            source="gnomad",
+        ))
+    return VariantResponse(
+        available=True,
+        variants=variants,
+        truncated=len(rows) >= 5000,
+        detail="gnomAD GraphQL API",
+    )
+
+
+def _remote_clinvar_variants(
+    assembly: str, chrom: str, start: int, end: int
+) -> VariantResponse:
+    try:
+        rows = _remote_region_variants(assembly, chrom, start, end).get("clinvar_variants", [])
+    except RuntimeError as exc:
+        return VariantResponse(available=False, detail=str(exc))
+
+    variants = []
+    for item in rows:
+        variation_id = item.get("clinvar_variation_id")
+        variants.append(Variant(
+            pos=int(item["pos"]),
+            ref=item["ref"],
+            alt=item["alt"],
+            id=str(variation_id) if variation_id is not None else item.get("variant_id"),
+            clnsig=item.get("clinical_significance"),
+            review_status=item.get("review_status"),
+            gold_stars=item.get("gold_stars"),
+            source="clinvar",
+        ))
+    return VariantResponse(
+        available=True,
+        variants=variants,
+        truncated=len(rows) >= 5000,
+        detail="gnomAD GraphQL API ClinVar track",
+    )
+
+
 @router.get("/variants", response_model=VariantResponse)
 def variants(source: str, assembly: str, chrom: str, start: int, end: int) -> VariantResponse:
+    if start < 1 or end < start:
+        return VariantResponse(available=False, detail="invalid region")
     if end - start > 1_000_000:
         return VariantResponse(available=False, detail="region too large")
+    if assembly not in GNOMAD_REMOTE_DATASETS:
+        return VariantResponse(
+            available=False,
+            detail=f"variant annotations do not support {assembly}",
+        )
+
     if source == "gnomad":
-        if assembly != "GRCh38":
-            return VariantResponse(available=False, detail="gnomAD v4.1 is GRCh38 only")
-        return _gnomad_variants(chrom, start, end)
+        if assembly == "GRCh38":
+            local = _gnomad_variants(chrom, start, end)
+            if local.available:
+                return local
+        return _remote_gnomad_variants(assembly, chrom, start, end)
+
     if source == "clinvar":
-        return _clinvar_variants(assembly, chrom, start, end)
+        local = _clinvar_variants(assembly, chrom, start, end)
+        if local.available:
+            return local
+        return _remote_clinvar_variants(assembly, chrom, start, end)
+
     return VariantResponse(available=False, detail=f"unknown source {source}")
 
 

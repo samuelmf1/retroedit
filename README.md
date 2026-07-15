@@ -79,6 +79,28 @@ curl -fsS http://127.0.0.1:8000/api/health
 curl -fsS http://127.0.0.1:8000/api/genomics/status
 ```
 
+### Optional variant annotations
+
+The gnomAD and ClinVar buttons query the official gnomAD GraphQL API through the
+Python backend, so local VCF files are not required. Requests are made only when
+a user enables a track. GRCh38 uses gnomAD v4 and GRCh37 uses gnomAD v2.1;
+human variant tracks are unavailable for GRCm39.
+
+Successful regional responses are shared by both tracks and cached in the
+Uvicorn worker for 15 minutes. The defaults can be adjusted in the systemd
+environment:
+
+```ini
+Environment=GNOMAD_API_URL=https://gnomad.broadinstitute.org/api
+Environment=GNOMAD_API_TIMEOUT=15
+Environment=GNOMAD_API_CACHE_TTL=900
+Environment=GNOMAD_API_CACHE_SIZE=256
+```
+
+Set `GNOMAD_API_URL=` to disable remote variant annotations. If local indexed
+VCFs are configured, the backend continues to prefer them and uses the API only
+as a fallback.
+
 ### Concurrency safeguards
 
 The application includes several limits for this 4 GB host:

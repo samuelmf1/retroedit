@@ -692,19 +692,21 @@ export default function App() {
     return { parity, aa, changed, title, kind }
   }, [region, derived, refSeq, edited, frame])
 
-  // Fetch gnomAD / ClinVar variants for the loaded region when toggled on.
+  // Always fetch gnomAD after an edit so common variants can flag affected
+  // guides. ClinVar and visible sequence markers remain controlled by toggles.
   useEffect(() => {
-    if (!region || (!viewOpts.gnomad && !viewOpts.clinvar)) { setVariants([]); return }
+    const needsGuideCheck = Boolean(derived?.edits)
+    if (!region || (!needsGuideCheck && !viewOpts.gnomad && !viewOpts.clinvar)) { setVariants([]); return }
     const controller = new AbortController()
     const { assembly, chrom, start, end } = region.reference
     const jobs = []
-    if (viewOpts.gnomad) jobs.push(fetchVariants({ source: 'gnomad', assembly, chrom, start, end }, controller.signal))
+    if (needsGuideCheck || viewOpts.gnomad) jobs.push(fetchVariants({ source: 'gnomad', assembly, chrom, start, end }, controller.signal))
     if (viewOpts.clinvar) jobs.push(fetchVariants({ source: 'clinvar', assembly, chrom, start, end }, controller.signal))
     Promise.all(jobs)
       .then((results) => setVariants(results.filter((r) => r.available).flatMap((r) => r.variants)))
       .catch((err) => { if (err.name !== 'AbortError') console.error(err) })
     return () => controller.abort()
-  }, [region, viewOpts.gnomad, viewOpts.clinvar])
+  }, [region, derived?.edits, viewOpts.gnomad, viewOpts.clinvar])
 
   const variantItems = useMemo(() => {
     if (!region || !derived) return []
@@ -717,7 +719,12 @@ export default function App() {
     return out
   }, [variants, region, derived, refSeq])
 
-  // Common polymorphisms (MAF >= 1%) that overlap a guide can impair cutting.
+  const displayedVariantItems = useMemo(() => variantItems.filter((v) => (
+    (v.source === 'gnomad' && viewOpts.gnomad) ||
+    (v.source === 'clinvar' && viewOpts.clinvar)
+  )), [variantItems, viewOpts.gnomad, viewOpts.clinvar])
+
+  // Common variants (alternate allele frequency >= 1%) can impair guide binding.
   const guideVariantWarn = useMemo(() => {
     if (!derived || !region) return {}
     const common = variantItems
@@ -726,8 +733,17 @@ export default function App() {
     if (!common.length) return {}
     const out = {}
     for (const g of derived.guides) {
-      const hit = common.find((v) => v.refIdx >= g.protoStart && v.refIdx <= g.pamEnd)
-      if (hit) out[g.id] = { af: hit.af, pos: hit.pos, id: hit.id, inPam: hit.refIdx >= g.pamStart }
+      const hits = common.filter((v) => v.refIdx >= g.protoStart && v.refIdx <= g.pamEnd)
+      if (!hits.length) continue
+      const hit = hits.reduce((highest, current) => current.af > highest.af ? current : highest)
+      out[g.id] = {
+        af: hit.af, pos: hit.pos, id: hit.id, ref: hit.ref, alt: hit.alt,
+        inPam: hit.refIdx >= g.pamStart, count: hits.length,
+        variants: hits.map((v) => ({
+          af: v.af, pos: v.pos, id: v.id, ref: v.ref, alt: v.alt,
+          inPam: v.refIdx >= g.pamStart,
+        })),
+      }
     }
     return out
   }, [derived, region, variantItems])
@@ -1141,6 +1157,8 @@ export default function App() {
                 annotationOptions={viewOpts}
                 onAnnotationChange={setViewOpts}
                 biotypes={biotypes}
+                annotationStatus={gStatus}
+                assembly={region.reference.assembly}
                 inputKey={query}
                 loadedInputKey={loadedControls?.query ?? query}
               />
@@ -1157,7 +1175,7 @@ export default function App() {
                 cutColumn={selectedGuide ? selectedGuide.cutDS : null}
                 tss={tssMarker}
                 codonCells={codonCells}
-                variantItems={variantItems}
+                variantItems={displayedVariantItems}
                 focusSpan={focusSpanDisplay}
                 nearMask={derived.nearMask}
                 junctions={derived.junctions}
