@@ -12,12 +12,12 @@ const ENSEMBL_GRCH37 = 'https://grch37.rest.ensembl.org'
 
 registerGenome({
   id: 'human-grch38', organism: 'Human', assembly: 'GRCh38',
-  provider: 'ensembl', species: 'homo_sapiens', host: ENSEMBL,
+  provider: 'ensembl', species: 'homo_sapiens', host: ENSEMBL, note: 'hg38',
 })
 registerGenome({
   id: 'human-grch37', organism: 'Human', assembly: 'GRCh37',
   provider: 'ensembl', species: 'homo_sapiens', host: ENSEMBL_GRCH37,
-  note: 'hg19 coordinates',
+  note: 'hg19',
 })
 registerGenome({
   id: 'mouse-grcm39', organism: 'Mouse', assembly: 'GRCm39',
@@ -38,7 +38,7 @@ const FOCUS_PAD_BP = 200
  *
  * Coordinates are always read in the selected genome's build — there is no liftover.
  */
-export async function resolveLocus(query, genome, windowBp) {
+export async function resolveLocus(query, genome, windowBp = 700) {
   const term = query.trim()
   if (!term) throw new Error('Enter a gene symbol or a chrom:position')
 
@@ -82,10 +82,10 @@ export async function resolveLocus(query, genome, windowBp) {
   }
 }
 
-export async function loadRegion({ query, genomeId, windowBp }) {
+export async function loadRegion({ query, genomeId, windowBp = 700, locus: exactLocus = null }) {
   const genome = getGenome(genomeId)
   const provider = getProvider(genome.provider)
-  const locus = await resolveLocus(query, genome, windowBp)
+  const locus = exactLocus ?? await resolveLocus(query, genome, windowBp)
 
   const length = locus.end - locus.start + 1
   if (length > genome.maxRegionBp) {

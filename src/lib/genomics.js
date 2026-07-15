@@ -24,6 +24,58 @@ export async function fetchCanonicalExons({ assembly, gene }) {
 }
 
 
+export async function fetchNearbyFeatures({ assembly, chrom, start, end }, signal) {
+  try {
+    const midpoint = Math.floor((start + end) / 2)
+    const ranges = [[start, midpoint], [midpoint + 1, end]].filter(([a, b]) => b >= a)
+    const payloads = await Promise.all(ranges.map(async ([a, b]) => {
+      const params = new URLSearchParams({
+        assembly, chrom: String(chrom), start: String(a), end: String(b),
+      })
+      const res = await fetch(`/api/genomics/annotations?${params}`, { signal })
+      if (!res.ok) throw new Error(String(res.status))
+      return (await res.json()).features
+    }))
+
+    const genes = new Map()
+    const transcripts = new Map()
+    const exons = new Map()
+    payloads.forEach((features) => {
+      features.genes.forEach((gene) => genes.set(gene.id, gene))
+      features.transcripts.forEach((transcript) => transcripts.set(transcript.id, transcript))
+      features.exons.forEach((exon) => exons.set(`${exon.transcript}:${exon.start}:${exon.end}`, exon))
+    })
+
+    const exonsByTranscript = new Map()
+    exons.forEach((exon) => {
+      const list = exonsByTranscript.get(exon.transcript) ?? []
+      list.push(exon)
+      exonsByTranscript.set(exon.transcript, list)
+    })
+    const transcriptsByGene = new Map()
+    transcripts.forEach((transcript) => {
+      const list = transcriptsByGene.get(transcript.gene) ?? []
+      list.push(transcript)
+      transcriptsByGene.set(transcript.gene, list)
+    })
+
+    return [...genes.values()].map((gene) => {
+      const candidates = transcriptsByGene.get(gene.id) ?? []
+      const transcript = candidates.sort((a, b) => (
+        Number(b.isCanonical) - Number(a.isCanonical) ||
+        (b.end - b.start) - (a.end - a.start)
+      ))[0]
+      return {
+        ...gene,
+        exons: transcript ? (exonsByTranscript.get(transcript.id) ?? []) : [],
+      }
+    }).sort((a, b) => a.start - b.start || b.end - a.end)
+  } catch (err) {
+    if (err.name === 'AbortError') throw err
+    return []
+  }
+}
+
 export async function fetchVariants({ source, assembly, chrom, start, end }, signal) {
   try {
     const params = new URLSearchParams({ source, assembly, chrom: String(chrom), start: String(start), end: String(end) })

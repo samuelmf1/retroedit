@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { createPortal } from 'react-dom'
 import { complementBase } from '../lib/bio.js'
 import { baseStatus } from '../lib/editModel.js'
 
@@ -69,12 +70,18 @@ const MIN_BPR = 30
 const MAX_BPR = 240
 const MAX_FEATURE_LANES = 32
 const OVERSCAN = 4
+const MIN_OVERVIEW_BP = 100
+
+function formatChrom(chrom) {
+  const value = String(chrom)
+  return /^chr/i.test(value) ? `chr${value.slice(3)}` : `chr${value}`
+}
 
 /** Greedy interval packing; omit maxLanes to retain every item. */
-function packLanes(items, maxLanes = Number.POSITIVE_INFINITY) {
+function packLanes(items, maxLanes = Number.POSITIVE_INFINITY, minGap = 1) {
   const laneEnds = []
   for (const item of [...items].sort((a, b) => a.ds - b.ds)) {
-    let lane = laneEnds.findIndex((end) => end < item.ds - 1)
+    let lane = laneEnds.findIndex((end) => end < item.ds - minGap)
     if (lane === -1 && laneEnds.length < maxLanes) {
       lane = laneEnds.length
       laneEnds.push(-1)
@@ -91,6 +98,7 @@ function packFeatureLanes(items, maxLanes) {
   const others = packLanes(
     items.filter((item) => item.level !== 'gene'),
     Math.max(0, maxLanes - geneLaneCount),
+    0,
   )
   for (const item of others) if (item.lane >= 0) item.lane += geneLaneCount
   return [...genes, ...others]
@@ -108,6 +116,15 @@ function bucketByRow(items, bpr, rowCount) {
   return rows
 }
 
+/** Remove globally reserved lanes that have no feature in a particular row. */
+function compactRowLanes(rows) {
+  return rows.map((items) => {
+    const used = [...new Set(items.map((item) => item.lane))].sort((a, b) => a - b)
+    const compact = new Map(used.map((lane, index) => [lane, index]))
+    return items.map((item) => ({ ...item, lane: compact.get(item.lane) }))
+  })
+}
+
 /** Pixel span of [s, e] clipped to a row, or null when they don't overlap. */
 function clip(s, e, rowStart, rowEnd) {
   const a = Math.max(s, rowStart)
@@ -119,6 +136,8 @@ function clip(s, e, rowStart, rowEnd) {
 const SequenceViewer = forwardRef(function SequenceViewer(
   {
     reference,
+    locusOverview,
+    overviewTarget,
     edited,
     guideItems,
     featureItems,
@@ -137,6 +156,13 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     onCaretChange,
     onSelectionChange,
     onSelectGuide,
+    onOverviewNavigate,
+    onOverviewResize,
+    onOverviewExon,
+    overviewDisabled,
+    onExtendLeft,
+    onExtendRight,
+    extensionDisabled,
     onKeyDown,
   },
   ref,
@@ -145,7 +171,11 @@ const SequenceViewer = forwardRef(function SequenceViewer(
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportH, setViewportH] = useState(600)
   const [bpr, setBpr] = useState(60)
+  const [overviewDragPercent, setOverviewDragPercent] = useState(null)
+  const [overviewResizeRange, setOverviewResizeRange] = useState(null)
   const dragging = useRef(false)
+  const overviewDragging = useRef(false)
+  const overviewResizing = useRef(null)
 
   const len = edited.length
   const refSeq = reference.seq
@@ -173,7 +203,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
 
     const fwdRows = bucketByRow(fwd, bpr, rowCount)
     const revRows = bucketByRow(rev, bpr, rowCount)
-    const featRows = bucketByRow(feats, bpr, rowCount)
+    const featRows = compactRowLanes(bucketByRow(feats, bpr, rowCount))
 
     const lanesOf = (rows) => rows.map((items) => items.reduce((m, i) => Math.max(m, i.lane + 1), 0))
     const fwdLanes = lanesOf(fwdRows)
@@ -295,6 +325,185 @@ const SequenceViewer = forwardRef(function SequenceViewer(
   const selEnd = selection ? Math.max(selection.anchor, selection.focus) : -1
   const hasSelection = selEnd > selStart
 
+  const selectionSummary = useMemo(() => {
+    if (!hasSelection) return null
+
+    const selected = edited.slice(selStart, selEnd)
+    let gcBases = 0
+    let dnaBases = 0
+    let minRef = Infinity
+    let maxRef = -Infinity
+
+    selected.forEach((record) => {
+      const base = String(record.base || '').toUpperCase()
+      if ('ACGT'.includes(base)) {
+        dnaBases += 1
+        if (base === 'G' || base === 'C') gcBases += 1
+      }
+      if (record.ref != null) {
+        minRef = Math.min(minRef, record.ref)
+        maxRef = Math.max(maxRef, record.ref)
+      }
+    })
+
+    const hasReferenceRange = Number.isFinite(minRef) && Number.isFinite(maxRef)
+    const range = hasReferenceRange
+      ? `${formatChrom(reference.chrom)}:${(reference.start + minRef).toLocaleString()}–${(reference.start + maxRef).toLocaleString()}`
+      : `edited bases ${(selStart + 1).toLocaleString()}–${selEnd.toLocaleString()}`
+
+    return {
+      count: selected.length,
+      range,
+      gc: dnaBases ? (gcBases / dnaBases) * 100 : 0,
+    }
+  }, [edited, hasSelection, reference.chrom, reference.start, selEnd, selStart])
+
+  const overviewGeometry = useMemo(() => {
+    if (!locusOverview || locusOverview.end < locusOverview.start) return null
+    const span = locusOverview.end - locusOverview.start + 1
+    const percent = (position) => ((position - locusOverview.start) / span) * 100
+    const segment = (start, end) => {
+      const clippedStart = Math.max(locusOverview.start, start)
+      const clippedEnd = Math.min(locusOverview.end, end)
+      if (clippedEnd < clippedStart) return null
+      return {
+        left: `${Math.max(0, Math.min(100, percent(clippedStart)))}%`,
+        width: `${Math.max(0.18, ((clippedEnd - clippedStart + 1) / span) * 100)}%`,
+      }
+    }
+
+    const laneEnds = []
+    const elements = []
+    for (const element of [...(locusOverview.elements ?? [])].sort((a, b) => a.start - b.start || b.end - a.end)) {
+      const box = segment(element.start, element.end)
+      if (!box) continue
+      let lane = laneEnds.findIndex((end) => end < element.start)
+      if (lane < 0) {
+        if (laneEnds.length < 4) {
+          lane = laneEnds.length
+          laneEnds.push(-Infinity)
+        } else {
+          lane = laneEnds.indexOf(Math.min(...laneEnds))
+        }
+      }
+      laneEnds[lane] = Math.max(laneEnds[lane], element.end)
+      const boxLeft = parseFloat(box.left)
+      const boxWidth = parseFloat(box.width)
+      const exonBoxes = (element.exons ?? []).map((exon) => segment(exon.start, exon.end)).filter(Boolean).map((exon) => ({
+        left: `${Math.max(0, ((parseFloat(exon.left) - boxLeft) / boxWidth) * 100)}%`,
+        width: `${Math.min(100, (parseFloat(exon.width) / boxWidth) * 100)}%`,
+      }))
+      elements.push({ ...element, box, exonBoxes, lane })
+    }
+
+    return {
+      exons: locusOverview.exons.map((exon, index) => ({ exon, index, style: segment(exon.start, exon.end) })).filter((item) => item.style),
+      elements,
+      laneCount: Math.max(1, laneEnds.length),
+      window: segment(reference.start, reference.end),
+    }
+  }, [locusOverview, reference.end, reference.start])
+
+  const overviewWindowStyle = useMemo(() => {
+    if (!overviewGeometry) return null
+    const overviewSpan = locusOverview.end - locusOverview.start + 1
+    if (overviewResizeRange) {
+      const left = ((overviewResizeRange.start - locusOverview.start) / overviewSpan) * 100
+      const width = ((overviewResizeRange.end - overviewResizeRange.start + 1) / overviewSpan) * 100
+      return {
+        left: `${Math.max(0, Math.min(100, left))}%`,
+        width: `${Math.max(0.18, Math.min(100, width))}%`,
+      }
+    }
+    if (overviewDragPercent == null) return overviewGeometry.window
+    const windowPercent = Math.min(100, ((reference.end - reference.start + 1) / overviewSpan) * 100)
+    const left = Math.max(0, Math.min(100 - windowPercent, overviewDragPercent - windowPercent / 2))
+    return { left: `${left}%`, width: `${windowPercent}%` }
+  }, [locusOverview, overviewDragPercent, overviewGeometry, overviewResizeRange, reference.end, reference.start])
+
+  const overviewPosition = useCallback((event) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    const percent = Math.max(0, Math.min(100, ((event.clientX - rect.left) / rect.width) * 100))
+    const position = Math.round(locusOverview.start + (percent / 100) * (locusOverview.end - locusOverview.start))
+    return { percent, position }
+  }, [locusOverview])
+
+  const resizedOverviewRange = useCallback((position, side = overviewResizing.current) => {
+    if (side === 'start') {
+      return {
+        start: Math.max(locusOverview.start, Math.min(position, reference.end - MIN_OVERVIEW_BP + 1)),
+        end: reference.end,
+      }
+    }
+    return {
+      start: reference.start,
+      end: Math.min(locusOverview.end, Math.max(position, reference.start + MIN_OVERVIEW_BP - 1)),
+    }
+  }, [locusOverview.end, locusOverview.start, reference.end, reference.start])
+
+  const handleOverviewPointerDown = useCallback((event) => {
+    if (overviewDisabled || event.button !== 0) return
+    const { percent } = overviewPosition(event)
+    const resizeSide = event.target.closest?.('[data-overview-resize]')?.dataset.overviewResize
+    if (resizeSide) {
+      overviewResizing.current = resizeSide
+      setOverviewResizeRange({ start: reference.start, end: reference.end })
+    } else {
+      overviewDragging.current = true
+      setOverviewDragPercent(percent)
+    }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    event.preventDefault()
+  }, [overviewDisabled, overviewPosition, reference.end, reference.start])
+
+  const handleOverviewPointerMove = useCallback((event) => {
+    if (overviewResizing.current) {
+      setOverviewResizeRange(resizedOverviewRange(overviewPosition(event).position))
+      return
+    }
+    if (overviewDragging.current) setOverviewDragPercent(overviewPosition(event).percent)
+  }, [overviewPosition, resizedOverviewRange])
+
+  const handleOverviewPointerUp = useCallback((event) => {
+    if (!overviewDragging.current && !overviewResizing.current) return
+    const { position } = overviewPosition(event)
+    const resizeSide = overviewResizing.current
+    overviewDragging.current = false
+    overviewResizing.current = null
+    setOverviewDragPercent(null)
+    setOverviewResizeRange(null)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    if (resizeSide) {
+      const range = resizedOverviewRange(position, resizeSide)
+      onOverviewResize?.(range.start, range.end)
+    } else {
+      onOverviewNavigate?.(position)
+    }
+  }, [onOverviewNavigate, onOverviewResize, overviewPosition, resizedOverviewRange])
+
+  const handleOverviewPointerCancel = useCallback(() => {
+    overviewDragging.current = false
+    overviewResizing.current = null
+    setOverviewDragPercent(null)
+    setOverviewResizeRange(null)
+  }, [])
+
+  const handleOverviewKeyDown = useCallback((event) => {
+    if (overviewDisabled || !onOverviewNavigate) return
+    const center = Math.round((reference.start + reference.end) / 2)
+    const step = reference.end - reference.start + 1
+    let position = null
+    if (event.key === 'ArrowLeft') position = center - step
+    if (event.key === 'ArrowRight') position = center + step
+    if (event.key === 'Home') position = locusOverview.start
+    if (event.key === 'End') position = locusOverview.end
+    if (position == null) return
+    event.preventDefault()
+    onOverviewNavigate(Math.max(locusOverview.start, Math.min(locusOverview.end, position)))
+  }, [locusOverview, onOverviewNavigate, overviewDisabled, reference.end, reference.start])
+
   const rows = []
   for (let r = firstRow; r <= lastRow && rowCount > 0; r++) {
     const rowStart = r * bpr
@@ -382,6 +591,53 @@ const SequenceViewer = forwardRef(function SequenceViewer(
       ? donorRibbon.cells.filter((c) => c.col >= rowStart && c.col <= rowEnd)
       : null
 
+    const ribbonBox = (cells) => cells?.length ? {
+      left: (cells[0].col - rowStart) * CHAR_W,
+      width: (cells[cells.length - 1].col - cells[0].col + 1) * CHAR_W,
+    } : null
+    const guideBox = ribbonBox(guideCells)
+    const donorBox = ribbonBox(donorCells)
+
+    const renderGuideRibbon = () => (
+      <div className={`ribbon guideribbon strand-${guideRibbon.strand === '-' ? 'minus' : 'plus'}`}
+        style={{ height: RIBBON_H, width: bpr * CHAR_W }}>
+        {guideRibbon.ds >= rowStart && guideRibbon.ds <= rowEnd &&
+          <span className={`ribbontag ${guideRibbon.strand === '-' ? 'minus' : 'plus'}`}
+            style={{ left: (guideRibbon.ds - rowStart) * CHAR_W }}>
+            spacer ({guideRibbon.strand})
+          </span>}
+        {guideBox && <span className="ribbonback"
+          style={{ ...guideBox, background: guideRibbon.protoColor }} />}
+        {guideCells.map((c) => (
+          <span
+            key={c.col}
+            className={`rc${!guideRibbon.lightText ? ' dark' : ''}`}
+            style={{ left: (c.col - rowStart) * CHAR_W }}
+          >{c.ch}</span>
+        ))}
+      </div>
+    )
+
+    const donorSide = donorRibbon?.orientation === 'antisense' ? 'minus' : 'plus'
+    const renderDonorRibbon = () => (
+      <div className={`ribbon donorribbon strand-${donorSide}`}
+        style={{ height: RIBBON_H, width: bpr * CHAR_W }}>
+        {donorRibbon.ds >= rowStart && donorRibbon.ds <= rowEnd &&
+          <span className={`ribbontag donor ${donorSide}`}
+            style={{ left: (donorRibbon.ds - rowStart) * CHAR_W }}>
+            <span className="sc">ss</span>ODN ({donorSide === 'minus' ? '−' : '+'})
+          </span>}
+        {donorBox && <span className="ribbonback" style={donorBox} />}
+        {donorCells.map((c) => (
+          <span key={c.col} className={`rc ${c.role}`}
+            style={{ left: (c.col - rowStart) * CHAR_W }}>{c.ch}</span>
+        ))}
+        {donorRibbon.cutCol >= rowStart && donorRibbon.cutCol <= rowEnd + 1 && (
+          <span className="ribboncut" style={{ left: (donorRibbon.cutCol - rowStart) * CHAR_W }} />
+        )}
+      </div>
+    )
+
     const renderFeature = (f) => {
       const box = clip(f.ds, f.de, rowStart, rowEnd)
       if (!box) return null
@@ -438,24 +694,8 @@ const SequenceViewer = forwardRef(function SequenceViewer(
           {layout.fwdRows[r].map(renderGuide)}
         </div>
 
-        {guideCells && (
-          <div className="ribbon guideribbon" style={{ height: RIBBON_H, width: bpr * CHAR_W }}>
-            {guideRibbon.ds >= rowStart && guideRibbon.ds <= rowEnd &&
-              <span className="ribbontag" style={{ left: (guideRibbon.ds - rowStart) * CHAR_W }}>
-                sgRNA {guideRibbon.strand}
-              </span>}
-            {guideCells.map((c) => (
-              <span
-                key={c.col}
-                className={`rc ${c.kind}${c.kind === 'proto' && !guideRibbon.lightText ? ' dark' : ''}`}
-                style={{
-                  left: (c.col - rowStart) * CHAR_W,
-                  background: c.kind === 'proto' ? guideRibbon.protoColor : undefined,
-                }}
-              >{c.ch}</span>
-            ))}
-          </div>
-        )}
+        {guideCells && guideRibbon.strand === '+' && renderGuideRibbon()}
+        {donorCells && donorRibbon.orientation === 'sense' && renderDonorRibbon()}
 
         <div
           className="strands"
@@ -464,6 +704,32 @@ const SequenceViewer = forwardRef(function SequenceViewer(
           onMouseMove={(e) => handleMouseMove(e, rowStart)}
           onDoubleClick={(e) => handleDoubleClick(e, rowStart)}
         >
+          {rowStart === 0 && (
+            <button
+              type="button"
+              className="seqextend left"
+              style={{ left: -12 }}
+              disabled={extensionDisabled}
+              title="Extend sequence 200 bp to the left"
+              aria-label="Extend sequence 200 bp to the left"
+              onMouseDown={(event) => event.stopPropagation()}
+              onDoubleClick={(event) => event.stopPropagation()}
+              onClick={(event) => { event.stopPropagation(); onExtendLeft() }}
+            >+</button>
+          )}
+          {rowEnd === len - 1 && (
+            <button
+              type="button"
+              className="seqextend right"
+              style={{ left: (rowEnd - rowStart + 1) * CHAR_W - 1 }}
+              disabled={extensionDisabled}
+              title="Extend sequence 200 bp to the right"
+              aria-label="Extend sequence 200 bp to the right"
+              onMouseDown={(event) => event.stopPropagation()}
+              onDoubleClick={(event) => event.stopPropagation()}
+              onClick={(event) => { event.stopPropagation(); onExtendRight() }}
+            >+</button>
+          )}
           {focusBand && <div className="focusband" style={focusBand} />}
           {selBand && <div className="selband" style={selBand} />}
           <div className="strand">{fwdChars}</div>
@@ -483,6 +749,8 @@ const SequenceViewer = forwardRef(function SequenceViewer(
             </div>
           )}
         </div>
+        {guideCells && guideRibbon.strand === '-' && renderGuideRibbon()}
+        {donorCells && donorRibbon.orientation === 'antisense' && renderDonorRibbon()}
 
         {showCodon && (
           <div className="codontrack" style={{ height: CODON_H, width: bpr * CHAR_W }}>
@@ -507,20 +775,6 @@ const SequenceViewer = forwardRef(function SequenceViewer(
           </div>
         )}
 
-        {donorCells && (
-          <div className="ribbon donorribbon" style={{ height: RIBBON_H, width: bpr * CHAR_W }}>
-            {donorRibbon.ds >= rowStart && donorRibbon.ds <= rowEnd &&
-              <span className="ribbontag donor" style={{ left: (donorRibbon.ds - rowStart) * CHAR_W }}>
-                <span className="sc">ss</span>ODN {donorRibbon.orientation === 'antisense' ? '−' : '+'}
-              </span>}
-            {donorCells.map((c) => (
-              <span key={c.col} className={`rc ${c.role}`} style={{ left: (c.col - rowStart) * CHAR_W }}>{c.ch}</span>
-            ))}
-            {donorRibbon.cutCol >= rowStart && donorRibbon.cutCol <= rowEnd + 1 && (
-              <span className="ribboncut" style={{ left: (donorRibbon.cutCol - rowStart) * CHAR_W }} />
-            )}
-          </div>
-        )}
 
         <div className="lanes" style={{ height: revLanes * LANE_H }}>
           {layout.revRows[r].map(renderGuide)}
@@ -538,15 +792,89 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     )
   }
 
+  const overviewTrackHeight = overviewGeometry?.elements.length
+    ? Math.max(32, overviewGeometry.laneCount * 14)
+    : 22
   return (
-    <div
-      className="viewer"
-      ref={scrollRef}
-      tabIndex={0}
-      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
-      onKeyDown={onKeyDown}
-    >
-      <div className="canvas" style={{ height: totalH }}>{rows}</div>
+    <div className={`viewer${selectionSummary ? ' has-selection' : ''}`}>
+      <div
+        className="viewer-scroll"
+        ref={scrollRef}
+        tabIndex={0}
+        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+        onKeyDown={onKeyDown}
+      >
+        <div className="canvas" style={{ height: totalH }}>{rows}</div>
+      </div>
+      {overviewTarget && overviewGeometry && createPortal(
+        <div className="genomebar top" style={{ '--overview-track-height': `${overviewTrackHeight}px`, '--overview-height': `${overviewTrackHeight + 16}px` }}>
+          <div
+            className={`genomebar-track${overviewGeometry.elements.length ? ' nearby' : ''}${overviewDragPercent == null ? '' : ' dragging'}`}
+            role="slider"
+            tabIndex={overviewDisabled ? -1 : 0}
+            aria-disabled={overviewDisabled}
+            aria-valuemin={locusOverview.start}
+            aria-valuemax={locusOverview.end}
+            aria-valuenow={Math.max(locusOverview.start, Math.min(locusOverview.end, Math.round((reference.start + reference.end) / 2)))}
+            aria-label={`${locusOverview.label}, current window ${formatChrom(reference.chrom)}:${reference.start}-${reference.end}`}
+            title="Click or drag to move the displayed window. Click an exon to snap to it."
+            onPointerDown={handleOverviewPointerDown}
+            onPointerMove={handleOverviewPointerMove}
+            onPointerUp={handleOverviewPointerUp}
+            onPointerCancel={handleOverviewPointerCancel}
+            onKeyDown={handleOverviewKeyDown}
+          >
+            {overviewGeometry.elements.length ? overviewGeometry.elements.map((element, index) => (
+              <button
+                type="button"
+                key={element.id || index}
+                className="genomebar-element"
+                style={{ ...element.box, top: element.lane * 14 }}
+                title={`${element.name} · ${element.biotype?.replace(/_/g, ' ') || 'gene'} · click to navigate`}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={() => onOverviewNavigate?.(Math.round((element.start + element.end) / 2))}
+              >
+                {element.exonBoxes.map((style, exonIndex) => (
+                  <span key={exonIndex} className="genomebar-element-exon" style={style} />
+                ))}
+                <span className="genomebar-element-label">{element.name} <b>{element.strand === -1 ? '− ←' : '+ →'}</b></span>
+              </button>
+            )) : (
+              <>
+                <span className={`genomebar-gene ${locusOverview.strand === -1 ? 'rev' : 'fwd'}`}
+                  title={locusOverview.strand === -1 ? '− strand · transcribed right to left' : '+ strand · transcribed left to right'} />
+                {overviewGeometry.exons.map(({ exon, index, style }) => (
+                  <button type="button" key={exon.id || index} className="genomebar-exon" style={style}
+                    title={`Exon ${exon.rank ?? index + 1} · click to snap`}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={() => onOverviewExon?.(index)} />
+                ))}
+              </>
+            )}
+            {overviewWindowStyle && (
+              <span className="genomebar-window" style={overviewWindowStyle}>
+                <span className="genomebar-resize left" data-overview-resize="start"
+                  title="Drag to resize the left edge of the displayed window" />
+                <span className="genomebar-resize right" data-overview-resize="end"
+                  title="Drag to resize the right edge of the displayed window" />
+              </span>
+            )}
+          </div>
+          <span className="genomebar-range">
+            <strong>{reference.seq.length.toLocaleString()} bp shown</strong>
+            <span aria-hidden="true"> · </span>
+            {formatChrom(locusOverview.chrom)}:{locusOverview.start.toLocaleString()}–{locusOverview.end.toLocaleString()}
+          </span>
+        </div>,
+        overviewTarget,
+      )}
+      {selectionSummary && (
+        <div className="selectionbar" role="status" aria-live="polite">
+          <span><strong>{selectionSummary.count.toLocaleString()}</strong> bases selected</span>
+          <span>Range <strong>{selectionSummary.range}</strong></span>
+          <span>GC <strong>{selectionSummary.gc.toFixed(1)}%</strong></span>
+        </div>
+      )}
     </div>
   )
 })

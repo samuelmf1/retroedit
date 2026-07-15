@@ -14,76 +14,95 @@ function Chip({ active, disabled, title, onClick, children }) {
   )
 }
 
+export function AnnotationControls({ opts, onChange, biotypes, className = '' }) {
+  const setLevel = (level) => onChange({
+    ...opts,
+    featureLevels: { ...opts.featureLevels, [level]: !opts.featureLevels[level] },
+  })
+
+  return (
+    <div className={`frgroup annotationsgroup${className ? ` ${className}` : ''}`}>
+      <span className="frlabel">Annotations</span>
+      <Chip active={opts.featureLevels.gene} onClick={() => setLevel('gene')}>Genes</Chip>
+      <Chip active={opts.featureLevels.transcript} onClick={() => setLevel('transcript')}>Transcripts</Chip>
+      <BiotypeMenu biotypes={biotypes} selected={opts.biotypes} onChange={(b) => onChange({ ...opts, biotypes: b })} />
+    </div>
+  )
+}
+
 export default function FeatureRibbon({
   opts, onChange, biotypes, status, assembly, frameAvailable,
   exonNav, navigationDisabled, onSnapExon, onPreviousExon, onNextExon,
-  onPanLeft, onPanRight,
+  onPanLeft, onPanRight, overviewTargetRef, locusOverview,
 }) {
-  const gnomadOk = status?.gnomad?.available && assembly === status?.gnomad?.assembly
-  const clinvarOk = !!status?.clinvar?.available?.[assembly]
+  // Track controls are temporarily hidden until the variant sources support
+  // the desired product behavior. Keep these checks here for easy restoration.
+  // const gnomadOk = status?.gnomad?.available && assembly === status?.gnomad?.assembly
+  // const clinvarOk = !!status?.clinvar?.available?.[assembly]
   const currentExon = exonNav?.exons?.[exonNav.index]
   const exonLabel = currentExon
     ? `Exon ${currentExon.rank ?? exonNav.index + 1} / ${exonNav.exons.length}`
     : ''
 
-  const setLevel = (level) => onChange({
-    ...opts,
-    featureLevels: { ...opts.featureLevels, [level]: !opts.featureLevels[level] },
-  })
-  const setTrack = (key) => onChange({ ...opts, [key]: !opts[key] })
 
   return (
-    <div className="featureribbon">
-      <div className="frgroup">
-        {currentExon && (
-          <div className="exonnav" title={`${exonNav.gene.name} · canonical ${exonNav.transcript.name}`}>
-            <button
-              type="button"
-              className="frchip exonarrow exonjump"
-              disabled={navigationDisabled || exonNav.index <= 0}
-              title="Jump to previous canonical exon"
-              aria-label="Jump to previous canonical exon"
-              onClick={onPreviousExon}
-            >⇤</button>
-            <button
-              type="button"
-              className="frchip exonarrow exonpan"
-              disabled={navigationDisabled}
-              title="Move left by one window"
-              aria-label="Move left by one window"
-              onClick={onPanLeft}
-            >←</button>
-            <button
-              type="button"
-              className="frchip exoncurrent"
-              disabled={navigationDisabled}
-              title={`Snap to ${exonLabel} of canonical transcript ${exonNav.transcript.name}`}
-              onClick={onSnapExon}
-            >{exonLabel}</button>
-            <button
-              type="button"
-              className="frchip exonarrow exonpan"
-              disabled={navigationDisabled}
-              title="Move right by one window"
-              aria-label="Move right by one window"
-              onClick={onPanRight}
-            >→</button>
-            <button
-              type="button"
-              className="frchip exonarrow exonjump"
-              disabled={navigationDisabled || exonNav.index >= exonNav.exons.length - 1}
-              title="Jump to next canonical exon"
-              aria-label="Jump to next canonical exon"
-              onClick={onNextExon}
-            >⇥</button>
-          </div>
+    <div className={`featureribbon${navigationDisabled ? ' loading' : ''}${!currentExon ? ' noexon' : ''}`}>
+      <div className="locusidentity">
+        <strong>{locusOverview?.label}</strong>
+        {locusOverview?.strand && (
+          <span className={`genomebar-strand ${locusOverview.strand === -1 ? 'rev' : 'fwd'}`}>
+            {locusOverview.strand === -1 ? '← − strand' : '+ strand →'}
+          </span>
         )}
-        <span className="frlabel">Annotations</span>
-        <Chip active={opts.featureLevels.gene} onClick={() => setLevel('gene')}>Genes</Chip>
-        <Chip active={opts.featureLevels.transcript} onClick={() => setLevel('transcript')}>Transcripts</Chip>
-        <BiotypeMenu biotypes={biotypes} selected={opts.biotypes} onChange={(b) => onChange({ ...opts, biotypes: b })} />
       </div>
+      {currentExon && (
+        <div className="exonnav" title={`${exonNav.gene.name} · canonical ${exonNav.transcript.name}`}>
+          <button
+            type="button"
+            className="frchip exonarrow exonpan"
+            disabled={navigationDisabled}
+            title="Move left by one window"
+            aria-label="Move left by one window"
+            onClick={onPanLeft}
+          >⇤</button>
+          <button
+            type="button"
+            className="frchip exonarrow exonjump"
+            disabled={navigationDisabled || exonNav.index <= 0}
+            title="Jump to previous canonical exon"
+            aria-label="Jump to previous canonical exon"
+            onClick={onPreviousExon}
+          >←</button>
+          <button
+            type="button"
+            className="frchip exoncurrent"
+            disabled={navigationDisabled}
+            title={`Snap to ${exonLabel} of canonical transcript ${exonNav.transcript.name}`}
+            onClick={onSnapExon}
+          >{exonLabel}</button>
+          <button
+            type="button"
+            className="frchip exonarrow exonjump"
+            disabled={navigationDisabled || exonNav.index >= exonNav.exons.length - 1}
+            title="Jump to next canonical exon"
+            aria-label="Jump to next canonical exon"
+            onClick={onNextExon}
+          >→</button>
+          <button
+            type="button"
+            className="frchip exonarrow exonpan"
+            disabled={navigationDisabled}
+            title="Move right by one window"
+            aria-label="Move right by one window"
+            onClick={onPanRight}
+          >⇥</button>
+        </div>
+      )}
+      <div className="overviewslot" ref={overviewTargetRef} />
 
+
+      {/* Track buttons temporarily hidden. Codons now render automatically
+          whenever a CDS frame is available; gnomAD and ClinVar remain off.
       <div className="frgroup">
         <span className="frlabel">Tracks</span>
         <Chip active={opts.codons && frameAvailable} disabled={!frameAvailable}
@@ -96,6 +115,7 @@ export default function FeatureRibbon({
           title={clinvarOk ? 'Show ClinVar clinical significance' : 'ClinVar data not available in this environment'}
           onClick={() => setTrack('clinvar')}>ClinVar</Chip>
       </div>
+      */}
     </div>
   )
 }
