@@ -89,6 +89,29 @@ export async function fetchVariants({ source, assembly, chrom, start, end }, sig
 }
 
 const OFFTARGET_BUSY_RETRIES = 6
+const offTargetCache = new Map()
+
+const offTargetCacheKey = (assembly, pam, guide) => [
+  assembly,
+  pam.toUpperCase(),
+  guide.spacer.toUpperCase(),
+  String(guide.chrom ?? '').replace(/^chr/i, ''),
+  guide.cutGenomic ?? '',
+].join('|')
+
+// Reuse completed Bowtie results for the life of the page. The genomic cut site
+// keeps identical spacers at different loci distinct, while the current guide
+// ID is restored when a cached result is read into a newly derived guide set.
+export function cachedOffTargets({ assembly, pam, guides }) {
+  const byGuide = {}
+  const missing = []
+  for (const guide of guides) {
+    const cached = offTargetCache.get(offTargetCacheKey(assembly, pam, guide))
+    if (cached) byGuide[guide.id] = { ...cached, id: guide.id }
+    else missing.push(guide)
+  }
+  return { byGuide, missing }
+}
 
 function abortableDelay(ms, signal) {
   return new Promise((resolve, reject) => {
@@ -105,12 +128,17 @@ function abortableDelay(ms, signal) {
 }
 
 export async function fetchOffTargets({ assembly, pam, guides }, signal) {
+  const cached = cachedOffTargets({ assembly, pam, guides })
+  if (!cached.missing.length) {
+    return { available: true, guides: Object.values(cached.byGuide), detail: null }
+  }
+
   try {
     for (let attempt = 0; attempt <= OFFTARGET_BUSY_RETRIES; attempt += 1) {
       const res = await fetch('/api/genomics/offtargets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ assembly, pam, guides }),
+        body: JSON.stringify({ assembly, pam, guides: cached.missing }),
         signal,
       })
       if (res.status === 429 && attempt < OFFTARGET_BUSY_RETRIES) {
@@ -121,12 +149,25 @@ export async function fetchOffTargets({ assembly, pam, guides }, signal) {
       if (!res.ok) {
         let detail = `off-target service returned ${res.status}`
         try { detail = (await res.json())?.detail ?? detail } catch { /* non-JSON response */ }
-        return { available: false, guides: [], detail, status: res.status }
+        return { available: false, guides: Object.values(cached.byGuide), detail, status: res.status }
       }
-      return await res.json()
+
+      const payload = await res.json()
+      if (payload.available) {
+        const requestsById = new Map(cached.missing.map((guide) => [guide.id, guide]))
+        for (const result of payload.guides) {
+          const guide = requestsById.get(result.id)
+          if (!guide) continue
+          const stored = { ...result }
+          delete stored.id
+          offTargetCache.set(offTargetCacheKey(assembly, pam, guide), stored)
+          cached.byGuide[guide.id] = { ...stored, id: guide.id }
+        }
+      }
+      return { ...payload, guides: Object.values(cached.byGuide) }
     }
   } catch (err) {
     if (err.name === 'AbortError') throw err
-    return { available: false, guides: [], detail: String(err) }
+    return { available: false, guides: Object.values(cached.byGuide), detail: String(err) }
   }
 }

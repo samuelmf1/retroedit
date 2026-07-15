@@ -64,7 +64,7 @@ export default function FeatureRibbon({
             title="Move left by one window"
             aria-label="Move left by one window"
             onClick={onPanLeft}
-          >⇤</button>
+          >←</button>
           <button
             type="button"
             className="frchip exonarrow exonjump"
@@ -72,7 +72,7 @@ export default function FeatureRibbon({
             title="Jump to previous canonical exon"
             aria-label="Jump to previous canonical exon"
             onClick={onPreviousExon}
-          >←</button>
+          >⇤</button>
           <button
             type="button"
             className="frchip exoncurrent"
@@ -87,7 +87,7 @@ export default function FeatureRibbon({
             title="Jump to next canonical exon"
             aria-label="Jump to next canonical exon"
             onClick={onNextExon}
-          >→</button>
+          >⇥</button>
           <button
             type="button"
             className="frchip exonarrow exonpan"
@@ -95,7 +95,7 @@ export default function FeatureRibbon({
             title="Move right by one window"
             aria-label="Move right by one window"
             onClick={onPanRight}
-          >⇥</button>
+          >→</button>
         </div>
       )}
       <div className="overviewslot" ref={overviewTargetRef} />

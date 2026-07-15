@@ -65,7 +65,7 @@ const LANE_H = 12
 const FEAT_H = 20
 const RULER_H = 22
 const ROW_GAP = 22
-const GUTTER = 12
+const GUTTER = 18
 const MIN_BPR = 30
 const MAX_BPR = 240
 const MAX_FEATURE_LANES = 32
@@ -708,7 +708,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
             <button
               type="button"
               className="seqextend left"
-              style={{ left: -12 }}
+              style={{ left: -16 }}
               disabled={extensionDisabled}
               title="Extend sequence 200 bp to the left"
               aria-label="Extend sequence 200 bp to the left"
@@ -721,7 +721,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
             <button
               type="button"
               className="seqextend right"
-              style={{ left: (rowEnd - rowStart + 1) * CHAR_W - 1 }}
+              style={{ left: (rowEnd - rowStart + 1) * CHAR_W + 2 }}
               disabled={extensionDisabled}
               title="Extend sequence 200 bp to the right"
               aria-label="Extend sequence 200 bp to the right"

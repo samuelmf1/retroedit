@@ -35,7 +35,7 @@ import { cachedScore, checkRs3Health, scoreContexts } from './lib/rs3.js'
 import { biotypesPresent, buildFeatureItems } from './lib/features.js'
 import { CODON_TABLE, buildCodonTrack, codonAt } from './lib/codon.js'
 import { complementBase } from './lib/bio.js'
-import { fetchCanonicalExons, fetchNearbyFeatures, fetchOffTargets, fetchVariants, genomicsStatus } from './lib/genomics.js'
+import { cachedOffTargets, fetchCanonicalExons, fetchNearbyFeatures, fetchOffTargets, fetchVariants, genomicsStatus } from './lib/genomics.js'
 
 const DEFAULT_VIEW_OPTS = {
   featureLevels: { gene: true, transcript: false },
@@ -106,7 +106,7 @@ export default function App() {
   const [viewOpts, setViewOpts] = useState(DEFAULT_VIEW_OPTS)
   const [gStatus, setGStatus] = useState(null)
   const [variants, setVariants] = useState([]) // gnomAD + ClinVar for the region
-  const [offTargets, setOffTargets] = useState({ available: false, byGuide: {}, loading: false })
+  const [offTargets, setOffTargets] = useState({ available: false, byGuide: {}, loading: false, pendingIds: new Set() })
   const [exonNav, setExonNav] = useState(null)
   const [nearbyFeatures, setNearbyFeatures] = useState([])
 
@@ -460,7 +460,7 @@ export default function App() {
           rs3Status.detail !== 'checking' &&
           !!gStatus &&
           (!scorable || !rs3Status.rs3 || !g.context30 || rs3 !== undefined) &&
-          (!gStatus?.offtarget?.assemblies?.[region.reference.assembly]?.ready || !offTargets.loading),
+          (!gStatus?.offtarget?.assemblies?.[region.reference.assembly]?.ready || !offTargets.pendingIds?.has(g.id)),
         fill: rs3Fill(score),
         lightText: rs3NeedsLightText(score),
         offtarget,
@@ -735,27 +735,52 @@ export default function App() {
   // Wait for edits to settle before starting the memory-intensive off-target
   // search. The server also guarantees that only one Bowtie job runs at a time.
   useEffect(() => {
-    if (!region || !derived) { setOffTargets({ available: false, byGuide: {}, loading: false }); return }
-    const ready = gStatus?.offtarget?.assemblies?.[region.reference.assembly]?.ready
-    if (!ready) { setOffTargets({ available: false, byGuide: {}, loading: false }); return }
+    const empty = { available: false, byGuide: {}, loading: false, pendingIds: new Set() }
+    if (!region || !derived) { setOffTargets(empty); return }
+    const assembly = region.reference.assembly
+    const ready = gStatus?.offtarget?.assemblies?.[assembly]?.ready
+    if (!ready) { setOffTargets(empty); return }
     const guides = derived.guides.map((g) => ({
       id: g.id, spacer: g.spacer, chrom: region.reference.chrom,
       cutGenomic: region.reference.start + g.cutBefore,
     }))
-    if (!guides.length) { setOffTargets({ available: true, byGuide: {}, loading: false }); return }
+    if (!guides.length) {
+      setOffTargets({ available: true, byGuide: {}, loading: false, pendingIds: new Set() })
+      return
+    }
+
+    const cached = cachedOffTargets({ assembly, pam, guides })
+    const pendingIds = new Set(cached.missing.map((guide) => guide.id))
+    setOffTargets({
+      available: true,
+      byGuide: cached.byGuide,
+      loading: pendingIds.size > 0,
+      pendingIds,
+    })
+    if (!cached.missing.length) return
+
     const controller = new AbortController()
-    setOffTargets({ available: true, byGuide: {}, loading: true })
     const timer = setTimeout(() => {
-      fetchOffTargets({ assembly: region.reference.assembly, pam, guides }, controller.signal)
+      fetchOffTargets({ assembly, pam, guides }, controller.signal)
         .then((res) => {
           const byGuide = {}
-          if (res.available) for (const g of res.guides) byGuide[g.id] = g
-          setOffTargets({ available: res.available, byGuide, loading: false })
+          for (const guide of res.guides) byGuide[guide.id] = guide
+          setOffTargets({
+            available: res.available || Object.keys(byGuide).length > 0,
+            byGuide,
+            loading: false,
+            pendingIds: new Set(),
+          })
         })
         .catch((err) => {
           if (err.name !== 'AbortError') {
             console.error(err)
-            setOffTargets({ available: false, byGuide: {}, loading: false })
+            setOffTargets({
+              available: Object.keys(cached.byGuide).length > 0,
+              byGuide: cached.byGuide,
+              loading: false,
+              pendingIds: new Set(),
+            })
           }
         })
     }, 1000)

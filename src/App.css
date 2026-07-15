@@ -447,10 +447,11 @@
 .lanes { position: relative; }
 .strands { position: relative; cursor: text; }
 .seqextend {
-  position: absolute; top: 11px; z-index: 6; width: 13px; height: 14px; padding: 0;
-  display: grid; place-items: center; border-radius: 7px;
-  border: 1px solid #b8c9ee; background: var(--accent-weak); color: var(--accent);
-  font-size: 11px; font-weight: 800; line-height: 1; box-shadow: 0 1px 3px #0001;
+  position: absolute; top: 0; z-index: 6; width: 14px; height: 36px; padding: 0;
+  display: flex; align-items: center; justify-content: center; border-radius: 5px;
+  border: 1px solid #9eb7ea; background: var(--accent-weak); color: var(--accent);
+  font-size: 13px; font-weight: 800; line-height: 1; box-shadow: 0 1px 3px #0002;
+  cursor: pointer;
 }
 .seqextend:hover:not(:disabled) { background: #dbe7ff; border-color: var(--accent); }
 .seqextend:disabled { opacity: 0.45; }
@@ -591,6 +592,19 @@
 .rs3legend > span:first-child { font-weight: 700; color: var(--muted); }
 .rs3gradient { flex: 1; max-width: 140px; height: 8px; border-radius: 4px;
   background: linear-gradient(90deg, rgb(214,221,228), rgb(23,33,43)); }
+
+.guidependingnote {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 7px; padding: 5px 14px;
+  border-bottom: 1px solid #ead8ad; background: #fff9e9; color: #76510d;
+  font-size: 10.5px; line-height: 1.35;
+}
+.guidependingnote .pendingbadge {
+  flex: none; padding: 1px 6px; border: 1px solid #dfc27b; border-radius: 999px;
+  background: #fff2c9; color: #76510d; font-size: 9px; font-weight: 800;
+  letter-spacing: 0.03em; text-transform: uppercase;
+}
+.guidependingnote strong { flex: none; }
+.chkcol input:disabled { cursor: not-allowed; opacity: 0.38; filter: grayscale(1); }
 
 /* guide table */
 .tablewrap { max-height: 320px; overflow-y: auto; }

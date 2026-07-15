@@ -17,7 +17,7 @@ export function EditActions({
       </button>
       <button className={`revert ${edits ? 'accent' : ''}`} onClick={onRevert}
         disabled={!edits} title="Clear all edits and restore the reference sequence">
-        Clear Edits
+        Revert to reference
       </button>
     </div>
   )

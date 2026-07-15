@@ -24,6 +24,7 @@ export default function GuideTable({
   const allChecked = ids.length > 0 && ids.every((id) => checked.has(id))
   const someChecked = ids.some((id) => checked.has(id))
   const nChecked = ids.filter((id) => checked.has(id)).length
+  const pendingCount = guides.length - ids.length
 
   return (
     <section className="panel guides">
@@ -52,6 +53,13 @@ export default function GuideTable({
           <span className="muted">low</span>
           <span className="rs3gradient" />
           <span className="muted">high</span>
+        </div>
+      )}
+      {pendingCount > 0 && (
+        <div className="guidependingnote" role="status">
+          <span className="pendingbadge">Export locked</span>
+          <strong>{pendingCount} pending</strong>
+          <span>Preview is available; export selection unlocks as each guide finishes.</span>
         </div>
       )}
 
@@ -94,12 +102,12 @@ export default function GuideTable({
                   className={`${g.id === selectedGuideId ? 'selected' : ''}${g.metricsReady ? '' : ' metrics-pending'}`}
                   onClick={() => onSelect(g.id)}
                 >
-                  <td className="chkcol" onClick={(e) => e.stopPropagation()}>
+                  <td className="chkcol" title={g.metricsReady ? 'Select this guide for export' : 'Preview available. Export selection unlocks when this guide’s metrics finish.'} onClick={(e) => e.stopPropagation()}>
                     <input
                       type="checkbox"
                       disabled={!g.metricsReady}
                       checked={g.metricsReady && checked.has(g.id)}
-                      title={g.metricsReady ? 'Select for export' : 'Available after this guide’s metrics finish'}
+                      title={g.metricsReady ? 'Select this guide for export' : 'Preview available; export selection unlocks when this guide’s metrics finish'}
                       onChange={() => onToggle(g.id)}
                     />
                   </td>
