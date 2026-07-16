@@ -1,5 +1,25 @@
 import { useEffect, useRef, useState } from 'react'
 
+export const DEFAULT_GNOMAD_MAF = 1e-5
+const GNOMAD_MAF_STEPS = [
+  { value: 1e-7, label: '0.00001%' },
+  { value: 1e-6, label: '0.0001%' },
+  { value: 1e-5, label: '0.001%' },
+  { value: 1e-4, label: '0.01%' },
+  { value: 1e-3, label: '0.1%' },
+  { value: 1e-2, label: '1%' },
+  { value: 1e-1, label: '10%' },
+]
+
+function mafIndexFor(value) {
+  const exact = GNOMAD_MAF_STEPS.findIndex((step) => step.value === value)
+  if (exact >= 0) return exact
+  return GNOMAD_MAF_STEPS.reduce((best, step, index) => (
+    Math.abs(Math.log10(step.value) - Math.log10(value)) <
+    Math.abs(Math.log10(GNOMAD_MAF_STEPS[best].value) - Math.log10(value)) ? index : best
+  ), 0)
+}
+
 function Chip({ active, disabled, title, onClick, children }) {
   return (
     <button
@@ -24,6 +44,7 @@ export function AnnotationControls({
   const setTrack = (track) => onChange({ ...opts, [track]: !opts[track] })
   const gnomadOk = !!status?.gnomad?.assemblies?.[assembly]
   const clinvarOk = !!status?.clinvar?.available?.[assembly]
+  const mafIndex = mafIndexFor(opts.gnomadMaf ?? DEFAULT_GNOMAD_MAF)
 
   return (
     <div className={`frgroup annotationsgroup${className ? ` ${className}` : ''}`}>
@@ -36,6 +57,16 @@ export function AnnotationControls({
       <Chip active={opts.gnomad} disabled={!gnomadOk}
         title={gnomadOk ? 'Show or hide gnomAD population variants' : 'gnomAD annotations are unavailable for this genome'}
         onClick={() => setTrack('gnomad')}>gnomAD</Chip>
+      {opts.gnomad && (
+        <label className="mafslider" title="Minimum gnomAD minor allele frequency shown; each step changes by 10×">
+          <span>MAF ≥</span>
+          <input type="range" min="0" max={GNOMAD_MAF_STEPS.length - 1} step="1"
+            value={mafIndex}
+            aria-label="Minimum gnomAD minor allele frequency"
+            onChange={(event) => onChange({ ...opts, gnomadMaf: GNOMAD_MAF_STEPS[Number(event.target.value)].value })} />
+          <output>{GNOMAD_MAF_STEPS[mafIndex].label}</output>
+        </label>
+      )}
       <Chip active={opts.clinvar} disabled={!clinvarOk}
         title={clinvarOk ? 'Show or hide ClinVar clinical annotations' : 'ClinVar annotations are unavailable for this genome'}
         onClick={() => setTrack('clinvar')}>ClinVar</Chip>

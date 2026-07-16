@@ -1,9 +1,9 @@
-// HDR donor (ssODN) design.
+// HDR donor (repair template) design.
 //
 // A donor converts the *reference* allele into the edited allele via homology-
 // directed repair. It carries the user's edit plus, when the edit doesn't
-// already destroy the guide, blocking mutations so Cas9 cannot re-cut the
-// repaired allele. Blocking mutations are made synonymous whenever the target
+// already destroy the guide, disrupting mutations so Cas9 cannot re-cut the
+// repaired allele. Disrupting mutations are made synonymous whenever the target
 // sits in a coding exon.
 //
 // All coordinates here are reference indices (0-based into `refSeq`); the guide
@@ -171,7 +171,7 @@ function designBlockingMutations({ refSeq, guide, pam, frame, forbidden, choiceK
 
   if (!chosen) {
     return {
-      subs: [], broke: false, silent: false, effect: 'none', reason: 'could not block guide',
+      subs: [], broke: false, silent: false, effect: 'none', reason: 'could not identify a PAM/seed-disrupting mutation',
       selectedSite: null,
       alternatives: evaluations.map(({ candidate, reason }) => ({ ...candidate, reason })),
       options, selectedKey: null, recommendedKey: null, manual: false,
@@ -201,7 +201,7 @@ function designBlockingMutations({ refSeq, guide, pam, frame, forbidden, choiceK
   }
 }
 
-/** Determine the actual re-cut blocking strategy for one guide. */
+/** Determine the actual re-cut disruption strategy for one guide. */
 export function planGuideBlock({ refSeq, guide, pam = 'NGG', frame = null, affected = [], blockingChoice = null }) {
   return designBlockingMutations({
     refSeq,
@@ -216,8 +216,8 @@ export function planGuideBlock({ refSeq, guide, pam = 'NGG', frame = null, affec
 /**
  * Design an HDR donor for `guide` given the user's edits.
  *
- * @returns {object} donor with sense/ssODN sequences, arm layout, an annotated
- *   base track for drawing, the blocking-mutation list, and any warnings.
+ * @returns {object} donor with sense/repair template sequences, arm layout, an annotated
+ *   base track for drawing, the disrupting-mutation list, and any warnings.
  */
 export function designDonor({
   refSeq,
@@ -267,7 +267,7 @@ export function designDonor({
     refSeq, guide, pam, frame, forbidden: new Set(affected), choiceKey: blockingChoice,
   })
   if (!block.broke) {
-    warnings.push('Could not find a mutation to block re-cutting; the donor may be re-cleaved.')
+    warnings.push('Could not identify a PAM/seed-disrupting mutation; the donor may be re-cleaved.')
   } else if (!block.silent) {
     warnings.push('No synonymous PAM or seed substitution was available; the selected fallback changes the protein.')
   }
@@ -284,7 +284,7 @@ export function designDonor({
     const rec = edited[d]
     const r = rec.ref
     if (rec.del) {
-      // Ghost of a deleted base: shown for alignment, absent from the ssODN.
+      // Ghost of a deleted base: shown for alignment, absent from the repair template.
       track.push({ base: rec.base, ref: r, role: 'del' })
       continue
     }
@@ -296,10 +296,10 @@ export function designDonor({
     }
     track.push({ base, ref: r, role })
   }
-  // Deleted bases fuse out: the ssODN is the non-ghost track.
+  // Deleted bases fuse out: the repair template is the non-ghost track.
   const senseSeq = track.filter((t) => t.role !== 'del').map((t) => t.base).join('')
 
-  // Cut offset within the *ssODN* (ghosts excluded), for the arm split.
+  // Cut offset within the *repair template* (ghosts excluded), for the arm split.
   let cutOffset = 0
   for (const t of track) {
     if (t.ref != null && t.ref >= cut) break
@@ -310,7 +310,7 @@ export function designDonor({
   const ssodn = useAntisense ? reverseComplement(senseSeq) : senseSeq
 
   // Silence proof: translate the reference vs donor across any codons the
-  // blocking mutations touch, restricted to the coding window.
+  // disrupting mutations touch, restricted to the coding window.
   let proof = null
   if (frame && block.subs.some((s) => s.synonymous)) {
     proof = silenceProof(refSeq, frame, block.subs, winStart, winEnd)
@@ -341,7 +341,7 @@ export function designDonor({
   }
 }
 
-/** Reference vs donor protein over the codons touched by silent blocking subs. */
+/** Reference vs donor protein over the codons touched by silent disrupting substitutions. */
 function silenceProof(refSeq, frame, subs, winStart, winEnd) {
   const positions = new Set()
   for (const s of subs) {

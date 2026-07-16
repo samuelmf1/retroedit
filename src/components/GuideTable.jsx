@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 export default function GuideTable({
-  guides, hasEdits, scorable, rs3Available, selectedGuideId, onSelect,
-  checked, onToggle, onToggleAll, onExport, offAvailable, variantWarn,
+  guides, hasEdits, scorable, rs3Available, rs3Model, onRs3Model, selectedGuideId, onSelect,
+  checked, onToggle, onToggleAll, onExport, offAvailable, variantWarn, showOffTargets = true,
 }) {
   const [sort, setSort] = useState(null)
   const selectedRowRef = useRef(null)
@@ -11,7 +11,7 @@ export default function GuideTable({
   const onSort = (column) => setSort((current) => (
     current?.column === column
       ? { column, direction: current.direction === 'asc' ? 'desc' : 'asc' }
-      : { column, direction: column === 'rs3' ? 'desc' : 'asc' }
+      : { column, direction: column.startsWith('rs3') ? 'desc' : 'asc' }
   ))
 
   // Reveal the selected row whenever the selection changes (e.g. a guide was
@@ -40,7 +40,7 @@ export default function GuideTable({
       </header>
 
       {!hasEdits && (
-        <p className="empty">Make an edit to see guides within 100 bp of it, ranked by RuleSet3 on-target score.</p>
+        <p className="empty">Make an edit to see guides within 100 bp of it, ranked by Hsu2013 Rule Set 3 on-target score.</p>
       )}
 
       {hasEdits && guides.length === 0 && (
@@ -50,9 +50,14 @@ export default function GuideTable({
       {guides.length > 0 && scorable && (
         <div className="rs3legend">
           <span>on-target efficiency (rs3)</span>
-          <span className="muted">low</span>
-          <span className="rs3gradient" />
-          <span className="muted">high</span>
+          <label className="rs3modelpicker">
+            <span>Rank and color by</span>
+            <select value={rs3Model} onChange={(event) => { setSort(null); onRs3Model(event.target.value) }}>
+              <option value="hsu2013">Hsu2013 (default)</option>
+              <option value="chen2013">Chen2013</option>
+            </select>
+          </label>
+          <span className="muted">low</span><span className="rs3gradient" /><span className="muted">high</span>
         </div>
       )}
       {pendingCount > 0 && (
@@ -82,16 +87,20 @@ export default function GuideTable({
                   title="Target strand: + uses the forward reference sequence; − uses its reverse complement." />
                 <SortHeader column="spacer" label="Spacer + PAM" sort={sort} onSort={onSort}
                   title="Guide spacer followed by the PAM, shown 5′→3′. The PAM is red and is not part of the synthesized guide RNA." />
-                <SortHeader column="rs3" label="RS3" className="num" sort={sort} onSort={onSort}
-                  title="Rule Set 3 predicted on-target activity. Higher is better; this score is not a percentage." />
+                <SortHeader column="rs3Hsu" label="RS3 Hsu" className="num" sort={sort} onSort={onSort}
+                  title="Rule Set 3 on-target activity using the Hsu2013 tracrRNA context. Higher is better; this score is not a percentage." />
+                <SortHeader column="rs3Chen" label="RS3 Chen" className="num" sort={sort} onSort={onSort}
+                  title="Rule Set 3 on-target activity using the Chen2013 tracrRNA context. Higher is better; this score is not a percentage." />
                 <SortHeader column="gc" label="%GC" className="num" sort={sort} onSort={onSort}
                   title="GC percentage of the spacer; the PAM is excluded." />
                 <SortHeader column="cut" label="Cut Δ" className="num" sort={sort} onSort={onSort}
                   title="Distance in base pairs from the predicted Cas9 cut to the nearest intended edit. Smaller is generally preferred for HDR." />
-                <SortHeader column="matches" label="MM" ariaLabel="mismatch counts" className="num" sort={sort} onSort={onSort}
-                  title="Genome-wide match counts shown as 0 MM · 1 MM · 2 MM. A unique guide is 1·0·0; lower off-target counts are better." />
+                {showOffTargets && (
+                  <SortHeader column="matches" label="MM" ariaLabel="mismatch counts" className="num" sort={sort} onSort={onSort}
+                    title="Genome-wide match counts shown as 0 MM · 1 MM · 2 MM. A unique guide is 1·0·0; lower off-target counts are better." />
+                )}
                 <SortHeader column="block" label="Re-cut" sort={sort} onSort={onSort}
-                  title="How the repaired allele avoids Cas9 re-cleavage: the intended edit may disrupt the PAM/seed, or the donor may require a blocking mutation." />
+                  title="How the repaired allele avoids Cas9 re-cleavage: the intended edit may disrupt the PAM/seed, or the donor may require a disrupting mutation." />
               </tr>
             </thead>
             <tbody>
@@ -125,10 +134,11 @@ export default function GuideTable({
                       </span></>
                     )}
                   </td>
-                  <td className="num">{scoreCell(g, scorable, rs3Available)}</td>
+                  <td className="num">{scoreCell(g, 'rs3Hsu', 'Hsu2013', scorable, rs3Available)}</td>
+                  <td className="num">{scoreCell(g, 'rs3Chen', 'Chen2013', scorable, rs3Available)}</td>
                   <td className="num" title={`${Math.round(g.gc * 100)}% GC in the spacer (PAM excluded)`}>{Math.round(g.gc * 100)}</td>
                   <td className="num" title={`${g.cutDist} bp from the predicted Cas9 cut to the nearest intended edit`}>{g.cutDist}</td>
-                  <td className="num">{offCell(g, offAvailable)}</td>
+                  {showOffTargets && <td className="num">{offCell(g, offAvailable)}</td>}
                   <td>{blockCell(g)}</td>
                 </tr>
               ))}
@@ -166,7 +176,8 @@ const BLOCK_ORDER = { pam: 0, seed: 1, silent: 2, noncoding: 3, nonsyn: 4, none:
 function sortValue(g, column) {
   if (column === 'strand') return g.strand
   if (column === 'spacer') return `${g.spacer}${g.pamSeq}`
-  if (column === 'rs3') return typeof g.rs3 === 'number' ? g.rs3 : null
+  if (column === 'rs3Hsu') return typeof g.rs3Hsu === 'number' ? g.rs3Hsu : null
+  if (column === 'rs3Chen') return typeof g.rs3Chen === 'number' ? g.rs3Chen : null
   if (column === 'gc') return g.gc
   if (column === 'cut') return g.cutDist
   if (column === 'matches') {
@@ -202,14 +213,15 @@ function sortGuides(guides, sort) {
   }).map(({ guide }) => guide)
 }
 
-function scoreCell(g, scorable, rs3Available) {
+function scoreCell(g, field, modelLabel, scorable, rs3Available) {
   if (!scorable) return <span className="muted" title="RS3 needs a 20 nt spacer + 3 nt PAM">n/a</span>
   if (!g.context30) return <span className="muted" title="guide runs off the loaded region">n/a</span>
-  if (typeof g.rs3 !== 'number') {
-    return <span className="muted" title={rs3Available ? 'Rule Set 3 score is still being calculated' : 'Rule Set 3 scoring is unavailable'}>{rs3Available ? '…' : 'off'}</span>
+  const score = g[field]
+  if (typeof score !== 'number') {
+    return <span className="muted" title={rs3Available ? `${modelLabel} Rule Set 3 score is still being calculated` : 'Rule Set 3 scoring is unavailable'}>{rs3Available ? '…' : 'off'}</span>
   }
-  const cls = g.rs3 >= 1 ? 'good' : g.rs3 <= -1 ? 'poor' : 'mid'
-  return <span className={`rs3 ${cls}`} title={`Rule Set 3 on-target activity score: ${g.rs3.toFixed(2)} (higher is better; not a percentage)`}>{g.rs3.toFixed(2)}</span>
+  const cls = score >= 1 ? 'good' : score <= -1 ? 'poor' : 'mid'
+  return <span className={`rs3 ${cls}`} title={`${modelLabel} Rule Set 3 on-target activity: ${score.toFixed(2)} (higher is better; not a percentage)`}>{score.toFixed(2)}</span>
 }
 
 function variantWarnTitle(w) {
@@ -239,19 +251,19 @@ function offCell(g, offAvailable) {
 
 function blockCell(g) {
   if (g.disruptsPam) {
-    return <span className="blocktag pam" title="The intended edit disrupts the PAM, so no additional blocking mutation is needed.">PAM✓</span>
+    return <span className="blocktag pam" title="The intended edit disrupts the PAM, so no additional disrupting mutation is needed.">PAM✓</span>
   }
   if (g.disruptsSeed) {
-    return <span className="blocktag seed" title="The intended edit disrupts the PAM-proximal seed, so no additional blocking mutation is needed.">seed✓</span>
+    return <span className="blocktag seed" title="The intended edit disrupts the PAM-proximal seed, so no additional disrupting mutation is needed.">seed✓</span>
   }
   if (!g.blocking?.broke) {
     return <span className="blocktag nonsyn" title={`No re-cut-prevention mutation was found. ${g.blocking?.reason ?? 'The repaired allele may remain susceptible to Cas9.'}`}>none</span>
   }
   if (!g.blocking.silent) {
-    return <span className="blocktag nonsyn" title={`The proposed blocking mutation prevents re-cutting but changes the encoded amino acid. ${g.blocking.reason ?? ''}`}>non-syn</span>
+    return <span className="blocktag nonsyn" title={`The proposed disrupting mutation prevents re-cutting but changes the encoded amino acid. ${g.blocking.reason ?? ''}`}>non-syn</span>
   }
   if (g.blocking.effect === 'noncoding') {
-    return <span className="blocktag neutral" title={`The proposed blocking mutation prevents re-cutting and lies outside a coding sequence. ${g.blocking.reason ?? ''}`}>noncoding</span>
+    return <span className="blocktag neutral" title={`The proposed disrupting mutation prevents re-cutting and lies outside a coding sequence. ${g.blocking.reason ?? ''}`}>noncoding</span>
   }
-  return <span className="blocktag none" title={`The proposed blocking mutation prevents re-cutting without changing the encoded amino acid. ${g.blocking.reason ?? ''}`}>silent</span>
+  return <span className="blocktag none" title={`The proposed disrupting mutation prevents re-cutting without changing the encoded amino acid. ${g.blocking.reason ?? ''}`}>silent</span>
 }

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import Controls from './components/Controls.jsx'
 import EditBar from './components/EditBar.jsx'
-import FeatureRibbon from './components/FeatureRibbon.jsx'
+import FeatureRibbon, { DEFAULT_GNOMAD_MAF } from './components/FeatureRibbon.jsx'
 import GuideTable from './components/GuideTable.jsx'
 import DonorPanel from './components/DonorPanel.jsx'
 import SequenceViewer from './components/SequenceViewer.jsx'
@@ -30,7 +30,7 @@ import {
 } from './lib/editModel.js'
 import { DEFAULT_ARM_LEN, designDonor, planGuideBlock } from './lib/hdr.js'
 import { rs3Fill, rs3NeedsLightText } from './lib/color.js'
-import { DEFAULT_GENOME_ID, loadRegion, loadRegionAnnotations } from './lib/genome.js'
+import { DEFAULT_GENOME_ID, loadRegion, loadRegionAnnotations, registerGenome } from './lib/genome.js'
 import { cachedScore, checkRs3Health, scoreContexts } from './lib/rs3.js'
 import { biotypesPresent, buildFeatureItems } from './lib/features.js'
 import { CODON_TABLE, buildCodonTrack, codonAt } from './lib/codon.js'
@@ -42,14 +42,33 @@ const DEFAULT_VIEW_OPTS = {
   biotypes: null, // null = all biotypes
   codons: true,
   gnomad: false,
+  gnomadMaf: DEFAULT_GNOMAD_MAF,
   clinvar: false,
 }
 const MAF_WARN = 0.01 // polymorphism threshold that can impair a guide
 const POSITION_VIEW_BP = 700
 const EXON_CONTEXT_BP = 200
 const EXTEND_BP = 200
+const CUSTOM_GENOME_ID = 'custom-upload'
+const MAX_CUSTOM_BP = 10_000
 
 const BASES = new Set(['A', 'C', 'G', 'T'])
+
+function parseCustomDna(text) {
+  const sequence = text
+    .split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith('>'))
+    .join('')
+    .replace(/\s/g, '')
+    .toUpperCase()
+  if (!sequence) throw new Error('The uploaded file does not contain a DNA sequence.')
+  const invalid = [...new Set(sequence.replace(/[ACGTRYSWKMBDHVN]/g, ''))]
+  if (invalid.length) throw new Error(`Unsupported DNA character${invalid.length === 1 ? '' : 's'}: ${invalid.join(' ')}`)
+  if (sequence.length > MAX_CUSTOM_BP) {
+    throw new Error(`Custom DNA is ${sequence.length.toLocaleString()} bases; the limit is ${MAX_CUSTOM_BP.toLocaleString()}.`)
+  }
+  return sequence
+}
 
 function extendEditedSnapshot(snapshot, newRefSeq, oldRefLength, leftAdded) {
   const prefix = Array.from(newRefSeq.slice(0, leftAdded), (base, ref) => ({ base, ref }))
@@ -69,13 +88,12 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [loadedControls, setLoadedControls] = useState(null)
   const [pam, setPam] = useState(DEFAULT_PAM)
-  const [tracrId, setTracrId] = useState('hsu2013')
+  const [rs3Model, setRs3Model] = useState('hsu2013')
   const spacerLength = DEFAULT_SPACER_LENGTH
   const loadChanged = loadedControls == null ||
     loadedControls.genomeId !== genomeId ||
     loadedControls.query !== query.trim() ||
-    loadedControls.pam !== pam ||
-    loadedControls.tracrId !== tracrId
+    loadedControls.pam !== pam
 
   const [region, setRegion] = useState(null)
   const [edited, setEdited] = useState([])
@@ -109,6 +127,7 @@ export default function App() {
   const [offTargets, setOffTargets] = useState({ available: false, byGuide: {}, loading: false, pendingIds: new Set() })
   const [exonNav, setExonNav] = useState(null)
   const [nearbyFeatures, setNearbyFeatures] = useState([])
+  const [customUpload, setCustomUpload] = useState(null)
 
   const viewerRef = useRef(null)
   const [overviewTarget, setOverviewTarget] = useState(null)
@@ -119,19 +138,33 @@ export default function App() {
   const doLoad = useCallback(async (opts = {}) => {
     const gid = opts.genomeId ?? genomeId
     const q = opts.query ?? query
+    const custom = opts.customSequence ?? customUpload
     setLoading(true)
     setError(null)
     try {
-      let result = await loadRegion({
-        query: q,
-        genomeId: gid,
-        windowBp: POSITION_VIEW_BP,
-        locus: opts.locus ?? null,
-      })
+      let result
+      if (gid === CUSTOM_GENOME_ID) {
+        if (!custom?.seq) throw new Error('Upload a FASTA or plain-DNA file first.')
+        const center = Math.max(1, Math.ceil(custom.seq.length / 2))
+        result = await loadRegion({
+          genomeId: gid,
+          locus: {
+            chrom: 'custom', start: 1, end: custom.seq.length,
+            focus: { start: center, end: center }, gene: null, label: custom.name,
+          },
+        })
+      } else {
+        result = await loadRegion({
+          query: q,
+          genomeId: gid,
+          windowBp: POSITION_VIEW_BP,
+          locus: opts.locus ?? null,
+        })
+      }
       let nextExonNav = null
 
       if (opts.geneContext) result.reference.gene = opts.geneContext
-      if (result.reference.gene && !opts.preserveExonNav && !opts.locus) {
+      if (gid !== CUSTOM_GENOME_ID && result.reference.gene && !opts.preserveExonNav && !opts.locus) {
         const data = await fetchCanonicalExons({
           assembly: result.reference.assembly,
           gene: result.reference.gene.id,
@@ -156,13 +189,13 @@ export default function App() {
         }
       }
 
-      // Commit the replacement view only after all layout-affecting annotation
-      // data is ready, avoiding an empty-feature frame followed by a second jump.
-      const annotations = await loadRegionAnnotations(result).catch(() => null)
-      if (annotations) result = { ...result, ...annotations }
+      if (gid !== CUSTOM_GENOME_ID) {
+        const annotations = await loadRegionAnnotations(result).catch(() => null)
+        if (annotations) result = { ...result, ...annotations }
+      }
 
       if (!opts.preserveLoadState) {
-        setLoadedControls({ genomeId: gid, query: q.trim(), pam, tracrId })
+        setLoadedControls({ genomeId: gid, query: q.trim(), pam })
       }
       setRegion(result)
       setEdited(makeEdited(result.reference.seq))
@@ -182,7 +215,40 @@ export default function App() {
     } finally {
       setLoading(false)
     }
-  }, [genomeId, query, pam, tracrId])
+  }, [genomeId, query, pam, customUpload])
+
+  const handleCustomUpload = useCallback(async (file) => {
+    try {
+      if (file.size > 1_000_000) throw new Error('Custom DNA files must be smaller than 1 MB.')
+      const seq = parseCustomDna(await file.text())
+      const name = file.name.replace(/\.(?:fa|fasta|fna|fas|txt)$/i, '') || 'Custom DNA'
+      const custom = { name, seq }
+      registerGenome({
+        id: CUSTOM_GENOME_ID,
+        organism: 'Custom',
+        assembly: 'Uploaded DNA',
+        provider: 'static',
+        maxRegionBp: MAX_CUSTOM_BP,
+        maxFeatureBp: 0,
+        note: `${seq.length.toLocaleString()} bp`,
+        data: { chrom: 'custom', start: 1, end: seq.length, seq, features: [], cds: [] },
+      })
+      setCustomUpload(custom)
+      setGenomeId(CUSTOM_GENOME_ID)
+      setQuery(name)
+      await doLoad({ genomeId: CUSTOM_GENOME_ID, query: name, customSequence: custom })
+    } catch (err) {
+      setError(err.message)
+    }
+  }, [doLoad])
+
+  const handleGenomeChange = useCallback((id) => {
+    setGenomeId(id)
+    if (id === CUSTOM_GENOME_ID && customUpload) {
+      setQuery(customUpload.name)
+      void doLoad({ genomeId: id, query: customUpload.name, customSequence: customUpload })
+    }
+  }, [customUpload, doLoad])
 
   const snapToExon = useCallback(async (index) => {
     const nav = exonNav
@@ -371,6 +437,7 @@ export default function App() {
 
 
   const refSeq = region?.reference.seq ?? ''
+  const isCustomRegion = region?.reference.genomeId === CUSTOM_GENOME_ID
   const frame = region?.frame ?? null
 
   const derived = useMemo(() => {
@@ -402,7 +469,7 @@ export default function App() {
   // protospacer, PAM, and RS3 context can be complete at the interval edge.
   // Extend one side at a time; after rebasing, this effect re-checks the other.
   useEffect(() => {
-    if (!region || !derived?.edits || loading || !derived.affectedRef.length) return
+    if (!region || isCustomRegion || !derived?.edits || loading || !derived.affectedRef.length) return
     const requiredBuffer = DEFAULT_WINDOW_BP + spacerLength + pam.length + 4
     const firstAffected = derived.affectedRef[0]
     const lastAffected = derived.affectedRef[derived.affectedRef.length - 1]
@@ -418,35 +485,38 @@ export default function App() {
 
   const scorable = rs3Compatible(pam, spacerLength)
 
-  // Fetch RS3 scores whenever the guide set or tracrRNA changes.
+  // Fetch both Rule Set 3 tracrRNA models for every guide context.
   useEffect(() => {
     if (!derived || !scorable || !rs3Status.rs3) return
     const contexts = derived.guides.map((g) => g.context30).filter(Boolean)
     if (!contexts.length) return
     const controller = new AbortController()
-    const rs3Name = TRACR_RNAS[tracrId].rs3Name
-    scoreContexts(contexts, rs3Name, controller.signal)
-      .then((res) => {
+    Promise.all([
+      scoreContexts(contexts, 'Hsu2013', controller.signal, !isCustomRegion),
+      scoreContexts(contexts, 'Chen2013', controller.signal, !isCustomRegion),
+    ])
+      .then((results) => {
         setScoreVersion((v) => v + 1)
-        if (!res.available && res.detail) setRs3Status({ rs3: false, detail: res.detail })
+        const unavailable = results.find((result) => !result.available && result.detail)
+        if (unavailable) setRs3Status({ rs3: false, detail: unavailable.detail })
       })
       .catch((err) => { if (err.name !== 'AbortError') console.error(err) })
     return () => controller.abort()
-  }, [derived?.guides, tracrId, scorable, rs3Status.rs3])
+  }, [derived?.guides, scorable, rs3Status.rs3])
 
-  // Merge scores + map guides into display coordinates for the viewer and table.
+  // Merge both scores and use the table-selected model for recommended order and viewer color.
   const guideView = useMemo(() => {
     if (!derived || !region) return { items: [], sorted: [] }
     const { dispStart, dispEnd } = derived
-    const rs3Name = TRACR_RNAS[tracrId].rs3Name
     const items = derived.guides.map((g) => {
-      const rs3 = g.context30 ? cachedScore(g.context30, rs3Name) : undefined
+      const rs3Hsu = g.context30 ? cachedScore(g.context30, 'Hsu2013') : undefined
+      const rs3Chen = g.context30 ? cachedScore(g.context30, 'Chen2013') : undefined
+      const score = rs3Model === 'chen2013' ? rs3Chen : rs3Hsu
       const cutDS = g.cutBefore < refSeq.length ? dispStart[g.cutBefore] : edited.length
       const protoDS = dispStart[g.protoStart]
       const protoDE = dispEnd[g.protoEnd]
       const pamDS = dispStart[g.pamStart]
       const pamDE = dispEnd[g.pamEnd]
-      const score = typeof rs3 === 'number' ? rs3 : undefined
       const offtarget = offTargets.byGuide[g.id]
       const blocking = planGuideBlock({
         refSeq, guide: g, pam, frame, affected: derived.affectedRef,
@@ -454,12 +524,15 @@ export default function App() {
       })
       return {
         ...g,
-        rs3: score,
-        rs3Complete: rs3 !== undefined,
+        rs3: typeof score === 'number' ? score : undefined,
+        rs3Hsu: typeof rs3Hsu === 'number' ? rs3Hsu : undefined,
+        rs3Chen: typeof rs3Chen === 'number' ? rs3Chen : undefined,
+        rs3Complete: typeof rs3Hsu === 'number' && typeof rs3Chen === 'number',
         metricsReady:
           rs3Status.detail !== 'checking' &&
           !!gStatus &&
-          (!scorable || !rs3Status.rs3 || !g.context30 || rs3 !== undefined) &&
+          (!scorable || !rs3Status.rs3 || !g.context30 ||
+            (typeof rs3Hsu === 'number' && typeof rs3Chen === 'number')) &&
           (!gStatus?.offtarget?.assemblies?.[region.reference.assembly]?.ready || !offTargets.pendingIds?.has(g.id)),
         fill: rs3Fill(score),
         lightText: rs3NeedsLightText(score),
@@ -475,7 +548,7 @@ export default function App() {
     const sorted = [...items].sort(compareGuides)
     return { items, sorted }
     // scoreVersion re-reads the RS3 cache after async scores land.
-  }, [derived, region, tracrId, refSeq, edited.length, scoreVersion, offTargets, pam, frame, blockChoiceMap, rs3Status, gStatus, scorable]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [derived, region, rs3Model, refSeq, edited.length, scoreVersion, offTargets, pam, frame, blockChoiceMap, rs3Status, gStatus, scorable]) // eslint-disable-line react-hooks/exhaustive-deps
 
 
   const biotypes = useMemo(() => (region ? biotypesPresent(region.features) : []), [region])
@@ -564,7 +637,7 @@ export default function App() {
   useEffect(() => {
     const reference = region?.reference
     const focus = region?.focus
-    if (!reference || reference.gene || !focus) {
+    if (!reference || reference.genomeId === CUSTOM_GENOME_ID || reference.gene || !focus) {
       setNearbyFeatures([])
       return undefined
     }
@@ -580,6 +653,7 @@ export default function App() {
   }, [region?.reference.assembly, region?.reference.chrom, region?.reference.gene, region?.focus?.start, region?.focus?.end])
 
   const locusOverview = useMemo(() => {
+    if (isCustomRegion) return null
     if (!region) return null
     const gene = exonNav?.gene ?? region.reference.gene
     if (gene) {
@@ -695,8 +769,8 @@ export default function App() {
   // Always fetch gnomAD after an edit so common variants can flag affected
   // guides. ClinVar and visible sequence markers remain controlled by toggles.
   useEffect(() => {
-    const needsGuideCheck = Boolean(derived?.edits)
-    if (!region || (!needsGuideCheck && !viewOpts.gnomad && !viewOpts.clinvar)) { setVariants([]); return }
+    const needsGuideCheck = Boolean(derived?.edits) && !isCustomRegion
+    if (!region || isCustomRegion || (!needsGuideCheck && !viewOpts.gnomad && !viewOpts.clinvar)) { setVariants([]); return }
     const controller = new AbortController()
     const { assembly, chrom, start, end } = region.reference
     const jobs = []
@@ -706,7 +780,7 @@ export default function App() {
       .then((results) => setVariants(results.filter((r) => r.available).flatMap((r) => r.variants)))
       .catch((err) => { if (err.name !== 'AbortError') console.error(err) })
     return () => controller.abort()
-  }, [region, derived?.edits, viewOpts.gnomad, viewOpts.clinvar])
+  }, [region, isCustomRegion, derived?.edits, viewOpts.gnomad, viewOpts.clinvar])
 
   const variantItems = useMemo(() => {
     if (!region || !derived) return []
@@ -720,9 +794,9 @@ export default function App() {
   }, [variants, region, derived, refSeq])
 
   const displayedVariantItems = useMemo(() => variantItems.filter((v) => (
-    (v.source === 'gnomad' && viewOpts.gnomad) ||
+    (v.source === 'gnomad' && viewOpts.gnomad && (v.af ?? 0) >= (viewOpts.gnomadMaf ?? DEFAULT_GNOMAD_MAF)) ||
     (v.source === 'clinvar' && viewOpts.clinvar)
-  )), [variantItems, viewOpts.gnomad, viewOpts.clinvar])
+  )), [variantItems, viewOpts.gnomad, viewOpts.gnomadMaf, viewOpts.clinvar])
 
   // Common variants (alternate allele frequency >= 1%) can impair guide binding.
   const guideVariantWarn = useMemo(() => {
@@ -933,7 +1007,6 @@ export default function App() {
     if (!region || !derived) return
     const chosen = guideView.sorted.filter((g) => g.metricsReady && checked.has(g.id))
     if (!chosen.length) return
-    const rs3Name = TRACR_RNAS[tracrId].rs3Name
     const chrom = region.reference.chrom
     const rows = chosen.map((g) => {
       const arms = armsFor(g)
@@ -948,15 +1021,17 @@ export default function App() {
         strand: g.strand,
         spacer: g.spacer,
         pam: g.pamSeq,
-        sgRNA: fullSgRna(g.spacer, tracrId),
-        rs3: typeof g.rs3 === 'number' ? g.rs3.toFixed(4) : '',
+        sgRNA: fullSgRna(g.spacer, rs3Model),
+        sgRNA_scaffold: TRACR_RNAS[rs3Model].label,
+        rs3_hsu2013: typeof g.rs3Hsu === 'number' ? g.rs3Hsu.toFixed(4) : '',
+        rs3_chen2013: typeof g.rs3Chen === 'number' ? g.rs3Chen.toFixed(4) : '',
         gc: (g.gc * 100).toFixed(0),
         cut_genomic: g.cutGenomic,
         cut_dist: g.cutDist,
         context_30mer: g.context30 ?? '',
-        ssODN: d.ok ? d.ssodn : '',
-        ssODN_strand: d.ok ? d.orientation : '',
-        block: d.ok ? d.blocking.reason : '',
+        repair_template: d.ok ? d.ssodn : '',
+        repair_template_strand: d.ok ? d.orientation : '',
+        re_cut_disruption: d.ok ? d.blocking.reason : '',
       }
     })
 
@@ -964,13 +1039,13 @@ export default function App() {
     let filename
     if (format === 'fasta') {
       text = rows.map((r) =>
-        `>${r.id}|spacer|rs3=${r.rs3}\n${r.spacer}\n` +
-        (r.ssODN ? `>${r.id}|ssODN_${r.ssODN_strand}\n${r.ssODN}\n` : ''),
+        `>${r.id}|spacer|rs3_hsu2013=${r.rs3_hsu2013}|rs3_chen2013=${r.rs3_chen2013}\n${r.spacer}\n` +
+        (r.repair_template ? `>${r.id}|repair_template_${r.repair_template_strand}\n${r.repair_template}\n` : ''),
       ).join('')
       filename = 'retroedit_guides.fasta'
     } else {
-      const cols = ['id', 'strand', 'spacer', 'pam', 'sgRNA', 'rs3', 'gc',
-        'cut_genomic', 'cut_dist', 'context_30mer', 'ssODN', 'ssODN_strand', 'block']
+      const cols = ['id', 'strand', 'spacer', 'pam', 'sgRNA', 'sgRNA_scaffold', 'rs3_hsu2013', 'rs3_chen2013', 'gc',
+        'cut_genomic', 'cut_dist', 'context_30mer', 'repair_template', 'repair_template_strand', 're_cut_disruption']
       text = [cols.join('\t'), ...rows.map((r) => cols.map((c) => r[c]).join('\t'))].join('\n') + '\n'
       filename = 'retroedit_guides.tsv'
     }
@@ -980,7 +1055,7 @@ export default function App() {
     a.download = filename
     a.click()
     URL.revokeObjectURL(url)
-  }, [region, derived, guideView.sorted, checked, tracrId, refSeq, edited, pam, frame, armsFor, orientation, blockChoiceMap])
+  }, [region, derived, guideView.sorted, checked, rs3Model, refSeq, edited, pam, frame, armsFor, orientation, blockChoiceMap])
 
   // ---- panel resizing ----
   const startResize = useCallback((event) => {
@@ -1109,11 +1184,13 @@ export default function App() {
       </header> */}
 
       <Controls
-        genomeId={genomeId} onGenome={setGenomeId}
+        genomeId={genomeId} onGenome={handleGenomeChange}
         query={query} onQuery={setQuery}
         pam={pam} onPam={setPam}
-        tracrId={tracrId} onTracr={setTracrId}
         onSearch={(example) => doLoad(example ? { query: example } : undefined)} loading={loading}
+        onCustomUpload={handleCustomUpload}
+        customMode={genomeId === CUSTOM_GENOME_ID}
+        customName={customUpload?.name}
         loadChanged={loadChanged}
       />
 
@@ -1123,7 +1200,7 @@ export default function App() {
 
       {region && derived && (
         <>
-          <div className="locusbar">
+          {!isCustomRegion && <div className="locusbar">
             <FeatureRibbon
               opts={viewOpts}
               onChange={setViewOpts}
@@ -1141,7 +1218,7 @@ export default function App() {
               onPanLeft={() => shiftWindow(-1)}
               onPanRight={() => shiftWindow(1)}
             />
-          </div>
+          </div>}
 
           <div className="workspace">
             <div className="editorpane">
@@ -1161,6 +1238,7 @@ export default function App() {
                 assembly={region.reference.assembly}
                 inputKey={query}
                 loadedInputKey={loadedControls?.query ?? query}
+                showAnnotations={!isCustomRegion}
               />
               <SequenceViewer
                 ref={viewerRef}
@@ -1185,13 +1263,13 @@ export default function App() {
                 onCaretChange={setCaret}
                 onSelectionChange={setSelection}
                 onSelectGuide={selectGuide}
-                onOverviewNavigate={navigateOverview}
-                onOverviewResize={resizeOverview}
-                onOverviewExon={snapToExon}
+                onOverviewNavigate={isCustomRegion ? undefined : navigateOverview}
+                onOverviewResize={isCustomRegion ? undefined : resizeOverview}
+                onOverviewExon={isCustomRegion ? undefined : snapToExon}
                 overviewDisabled={loading}
                 onKeyDown={handleKeyDown}
-                onExtendLeft={() => extendRegion(-1)}
-                onExtendRight={() => extendRegion(1)}
+                onExtendLeft={isCustomRegion ? null : () => extendRegion(-1)}
+                onExtendRight={isCustomRegion ? null : () => extendRegion(1)}
                 extensionDisabled={loading}
               />
             </div>
@@ -1202,7 +1280,8 @@ export default function App() {
               <GuideTable
                 guides={guideView.sorted}
                 hasEdits={derived.edits}
-                tracrId={tracrId}
+                rs3Model={rs3Model}
+                onRs3Model={setRs3Model}
                 scorable={scorable}
                 rs3Available={rs3Status.rs3}
                 selectedGuideId={selectedGuideId}
@@ -1213,11 +1292,11 @@ export default function App() {
                 onExport={exportGuides}
                 offAvailable={offTargets.available}
                 variantWarn={guideVariantWarn}
+                showOffTargets={!isCustomRegion}
               />
               <DonorPanel
                 donor={donor}
                 guide={selectedGuide}
-                tracrId={tracrId}
                 armLeft={selectedArms.left}
                 armRight={selectedArms.right}
                 onArmLeft={(v) => setSelectedArm('left', v)}
@@ -1242,6 +1321,10 @@ export default function App() {
 function GettingStarted() {
   return (
     <main className="gettingstarted">
+      <header className="demotitle">
+        <h1>RetroEdit Demo</h1>
+        <p>Follow the workflow below to see how a precise-editing design moves from locus to export.</p>
+      </header>
       <div className="tutorialstart">
         <span className="tutorialarrow up" aria-hidden="true">↑</span>
         <span className="tutorialnumber">1</span>
@@ -1269,14 +1352,26 @@ function GettingStarted() {
             <span className="tutorialarrow down" aria-hidden="true">↓</span>
           </div>
           <div className="mocksequence" aria-hidden="true">
-            <span className="mockstrand">ACTGACC<span className="mockedit mocksub">A</span>GAGGCTAC<span className="mockedit mockins">TT</span>CGTAG<span className="mockedit mockdel">GCT</span>GACCTGAGGCTACCGTA</span>
-            <span className="mockstrand mockcomplement">TGACTGG<span className="mockedit mocksub">T</span>CTCCGATG<span className="mockedit mockins">AA</span>GCATC<span className="mockedit mockdel">CGA</span>CTGGACTCCGATGGCAT</span>
-            <div className="mockeditlegend">
-              <span className="mocksub">C→A mutation</span>
-              <span className="mockins">+TT insertion</span>
-              <span className="mockdel">−GCT deletion</span>
+            <div className="mocktrackrow mockvariantrow">
+              <b>Variants</b>
+              <div className="mockvariants"><span className="gnomad-common">gnomAD ≥1%</span><span className="gnomad-rare">gnomAD rare</span><span className="clinvar-pathogenic">ClinVar pathogenic</span></div>
             </div>
-            <i>GENE</i>
+            <div className="mocktrackrow mockdnarow">
+              <b>Sequence</b>
+              <div className="mockdnatrack">
+                <span className="mockstrand">ACTGACC<span className="mockedit mocksub">A</span>GAGGCTAC<span className="mockedit mockins">TT</span>CGTAG<span className="mockedit mockdel">GCT</span>GACCTGAGGCTACCGTA</span>
+                <span className="mockstrand mockcomplement">TGACTGG<span className="mockedit mocksub">T</span>CTCCGATG<span className="mockedit mockins">AA</span>GCATC<span className="mockedit mockdel">CGA</span>CTGGACTCCGATGGCAT</span>
+              </div>
+            </div>
+            <div className="mockeditlegend">
+              <span className="mocksub">C→A mutation</span><span className="mockins">+TT insertion</span><span className="mockdel">−GCT deletion</span>
+            </div>
+            <div className="mocktrackrow mockcodonrow"><b>Codons / AA</b><div className="mockcodons"><span>ACT · T</span><span>GAG · E</span><span>GCT · A</span><span>ACC · T</span></div></div>
+            <div className="mockannotations">
+              <div className="mockannotationlane"><b>Gene</b><span className="mockgene">GENE</span></div>
+              <div className="mockannotationlane"><b>CDS / UTR</b><span className="mockutr">5′ UTR</span><span className="mockcds">CDS</span></div>
+              <div className="mockannotationlane"><b>Transcript ★</b><span className="mocktranscript"><i /><i /><i /></span></div>
+            </div>
           </div>
         </section>
         <span className="tutorialflow" aria-hidden="true">→</span>
@@ -1291,7 +1386,7 @@ function GettingStarted() {
           <div className="tutorialpanel">
             <div className="tutorialstep compact">
               <span className="tutorialnumber">5</span>
-              <div><h3>Select repair template(s)</h3><p>Review donor strand, homology arms, and the blocking mutation.</p></div>
+              <div><h3>Select repair template(s)</h3><p>Review donor strand, homology arms, and the disrupting mutation.</p></div>
             </div>
             <div className="mockdonor" aria-hidden="true"><i /><i /><i /></div>
           </div>

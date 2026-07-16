@@ -3,7 +3,7 @@
 An interactive sequence viewer for designing CRISPR homology-directed-repair
 (HDR) donor templates. Search a gene or locus, edit the reference (substitute,
 insert, delete), and the app finds SpCas9 guides near your edit, scores them
-with RuleSet3, and designs an ssODN repair template — including the silent
+with RuleSet3, and designs a repair template — including the silent
 mutations needed to stop Cas9 from re-cutting the repaired allele.
 
 ## What it does
@@ -22,8 +22,8 @@ mutations needed to stop Cas9 from re-cutting the repaired allele.
 - **Score** every guide with **RuleSet3** (sequence model), re-ranking as you
   edit. The tracrRNA choice feeds RS3's `sequence_tracr` parameter.
 - **Design an HDR donor** for the selected guide: symmetric homology arms
-  (default 75 bp, adjustable), the edit carried in the template, and a blocking
-  mutation that disrupts the PAM or seed. In coding exons the blocking mutation
+  (default 75 bp, adjustable), the edit carried in the template, and a disrupting
+  mutation that disrupts the PAM or seed. In coding exons the disrupting mutation
   is made **synonymous**, verified against the transcript's reading frame.
 
 ## Running it
@@ -44,6 +44,12 @@ npm run dev:api      # RS3 scoring service only
 
 The web app is usable without the Python service; guides are still found and
 donors still designed, but the RS3 column shows `off`.
+
+## Custom DNA uploads
+
+Users can upload FASTA or plain DNA containing up to 10,000 IUPAC nucleotide bases. The full sequence is held only in browser memory and is released when the page is closed or reloaded; it is never uploaded or written to server storage. RuleSet3 receives only the 30-base guide contexts needed for scoring, with server caching disabled for custom sequences.
+
+Custom mode retains sequence editing, local guide discovery, RuleSet3 scoring, HDR donor design, and export. Reference-dependent features—gene/transcript/CDS annotations, codons, locus navigation, gnomAD, ClinVar, flanking-sequence extension, and genome-wide off-target counts—are omitted.
 
 ## Production
 
@@ -247,7 +253,7 @@ src/lib/
   crispr.js      guide discovery, tracrRNA scaffolds, 30-mer contexts, ranking
   editModel.js   edit representation (ref-indexed base records) + coordinates
   codon.js       codon table, reading-frame map, synonymous-codon search
-  hdr.js         donor design + silent blocking mutations
+  hdr.js         donor design + silent disrupting mutations
   rs3.js         client for the scoring service
 src/components/  Controls, EditBar, SequenceViewer, GuideTable, DonorPanel
 server/app.py    RuleSet3 FastAPI service
@@ -274,9 +280,9 @@ optionally `fetchCoding`.
 
 - The reading-frame map follows the GFF3 phase convention and is verified to
   match full BRCA2 and TP53 CDS reconstructions exactly on both strands; the
-  translated protein is unchanged by the silent blocking mutations.
+  translated protein is unchanged by the silent disrupting mutations.
 - Guides target the **reference** allele (what Cas9 cuts); the donor converts it
-  to the edited allele. Blocking is skipped when the edit already disrupts the
+  to the edited allele. A disrupting mutation is skipped when the edit already disrupts the
   PAM or seed.
 - The melting-temperature helper is the classic long-oligo approximation, not
   nearest-neighbour.

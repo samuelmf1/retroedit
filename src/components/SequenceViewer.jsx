@@ -640,7 +640,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
         {donorRibbon.ds >= rowStart && donorRibbon.ds <= rowEnd &&
           <span className={`ribbontag donor ${donorSide}`}
             style={{ left: (donorRibbon.ds - rowStart) * CHAR_W }}>
-            <span className="sc">ss</span>ODN ({donorSide === 'minus' ? '−' : '+'})
+            Repair template ({donorSide === 'minus' ? '−' : '+'})
           </span>}
         {donorBox && <span className="ribbonback" style={donorBox} />}
         {donorCells.map((c) => (
@@ -729,7 +729,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
           onMouseMove={(e) => handleMouseMove(e, rowStart)}
           onDoubleClick={(e) => handleDoubleClick(e, rowStart)}
         >
-          {rowStart === 0 && (
+          {onExtendLeft && rowStart === 0 && (
             <button
               type="button"
               className="seqextend left"
@@ -742,7 +742,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
               onClick={(event) => { event.stopPropagation(); onExtendLeft() }}
             >+</button>
           )}
-          {rowEnd === len - 1 && (
+          {onExtendRight && rowEnd === len - 1 && (
             <button
               type="button"
               className="seqextend right"

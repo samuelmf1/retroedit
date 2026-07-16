@@ -1,11 +1,6 @@
 import { useState } from 'react'
 import ArmSlider from './ArmSlider.jsx'
-import { TRACR_RNAS, fullSgRna } from '../lib/crispr.js'
 
-// "ssODN" with the leading "ss" in small caps, per house style.
-function SsODN() {
-  return <span className="term"><span className="sc">ss</span>ODN</span>
-}
 
 function blockingOptionLabel(option, refStart, recommendedKey) {
   const edits = option.changes.length
@@ -18,7 +13,7 @@ function blockingOptionLabel(option, refStart, recommendedKey) {
 }
 
 export default function DonorPanel({
-  donor, guide, tracrId, armLeft, armRight, onArmLeft, onArmRight,
+  donor, guide, armLeft, armRight, onArmLeft, onArmRight,
   armsCustomized, onApplyArmsToAll, orientation, onOrientation, reference,
   blockingChoice, onBlockingChoice,
 }) {
@@ -39,7 +34,6 @@ export default function DonorPanel({
     setTimeout(() => setCopied(null), 1200)
   }
 
-  const sgRna = fullSgRna(guide.spacer, tracrId)
 
   return (
     <section className="panel donor">
@@ -57,7 +51,7 @@ export default function DonorPanel({
           <ArmSlider left={armLeft} right={armRight} onLeft={onArmLeft} onRight={onArmRight} />
         </label>
         <label className="field">
-          <span><SsODN /> strand</span>
+          <span>Repair template strand</span>
           <select value={orientation} onChange={(e) => onOrientation(e.target.value)}>
             <option value="auto">Auto (opposite the guide)</option>
             <option value="sense">Sense (+)</option>
@@ -85,7 +79,7 @@ export default function DonorPanel({
           </div>
 
           <div className={`blockrow ${donor.blocking.broke ? (donor.blocking.silent ? 'silent' : 'nonsilent') : 'fail'}`}>
-            <strong>Re-cut block:</strong> {donor.blocking.reason}
+            <strong>Re-cut disruption:</strong> {donor.blocking.reason}
             {donor.blocking.subs.length > 0 && (
               <span className="blocksubs">
                 {donor.blocking.subs.map((s) => (
@@ -100,7 +94,7 @@ export default function DonorPanel({
             {donor.blocking.options?.length > 0 && (
               <div className="blockselector">
                 <label>
-                  <span>Blocking edit</span>
+                  <span>Alternative PAM/seed disrupting mutations not selected</span>
                   <select
                     value={donor.blocking.manual ? blockingChoice : ''}
                     onChange={(event) => onBlockingChoice(event.target.value || null)}
@@ -120,7 +114,7 @@ export default function DonorPanel({
             )}
             {donor.blocking.alternatives?.length > 0 && (
               <div className="blockalternatives">
-                <strong>More ideal positions not selected:</strong>
+                <strong>Alternative PAM/seed disrupting mutations not selected:</strong>
                 {donor.blocking.alternatives.map((candidate) => (
                   <span key={`${candidate.kind}-${candidate.refIdx}`}>
                     g.{reference.start + candidate.refIdx} · {candidate.label}: {candidate.reason}
@@ -132,7 +126,7 @@ export default function DonorPanel({
 
           {donor.proof && (
             <div className="proof">
-              protein unchanged across blocked codons:
+              protein unchanged across affected codons:
               <code>{donor.proof.ref}</code> to <code>{donor.proof.donor}</code>
             </div>
           )}
@@ -141,17 +135,10 @@ export default function DonorPanel({
 
           <DonorTrack track={donor.track} cutRef={donor.cut} />
 
-          <SeqBlock label={<><SsODN /> donor ({donor.orientation})</>} seq={donor.ssodn}
+          <SeqBlock label={`Repair template (${donor.orientation})`} seq={donor.ssodn}
             onCopy={() => copy(donor.ssodn, 'donor')} copied={copied === 'donor'} />
           <SeqBlock label="Spacer" seq={guide.spacer}
             onCopy={() => copy(guide.spacer, 'spacer')} copied={copied === 'spacer'} />
-          <details className="sgrna">
-            <summary>Full sgRNA · {TRACR_RNAS[tracrId].label} scaffold ({sgRna.length} nt)</summary>
-            <div className="seqbox">
-              <code className="mono wrap"><span className="hl-spacer">{guide.spacer}</span>{TRACR_RNAS[tracrId].scaffold}</code>
-              <button className="copybtn" onClick={() => copy(sgRna, 'sgrna')}>{copied === 'sgrna' ? '✓' : 'copy'}</button>
-            </div>
-          </details>
         </>
       )}
     </section>
@@ -174,7 +161,7 @@ function SeqBlock({ label, seq, onCopy, copied }) {
   )
 }
 
-// Compact colored map of the donor: arms, edit, blocking, and deleted (ghost) bases.
+// Compact colored map of the donor: arms, edits, disrupting mutations, and deleted (ghost) bases.
 function DonorTrack({ track, cutRef }) {
   let cutIndex = track.findIndex((t) => t.ref != null && t.ref >= cutRef)
   if (cutIndex < 0) cutIndex = track.length
@@ -190,7 +177,7 @@ function DonorTrack({ track, cutRef }) {
         <span className="dt arm">arm</span>
         <span className="dt edit">edit</span>
         <span className="dt ins">insert</span>
-        <span className="dt block">block</span>
+        <span className="dt block">disrupt</span>
         <span className="dt del">del</span>
         <span className="cutkey">| cut</span>
       </div>

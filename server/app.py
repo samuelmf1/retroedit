@@ -138,9 +138,24 @@ def _score_uncached(contexts: List[str], tracr: str) -> List[Optional[float]]:
 
 
 
+def _score_private(contexts: List[str], tracr: str) -> List[Optional[float]]:
+    """Score transient contexts without retaining their sequences in the server cache."""
+    with _score_gate:
+        _load()
+        if _predict_seq is None:
+            return [None] * len(contexts)
+        try:
+            logger.info("scoring %d private guides with RuleSet3 (tracr=%s)", len(contexts), tracr)
+            return [float(score) for score in _predict_seq(contexts, sequence_tracr=tracr)]
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Private RuleSet3 scoring failed: %s", exc)
+            return [None] * len(contexts)
+
+
 class ScoreRequest(BaseModel):
     contexts: List[str] = Field(..., description="30-mer contexts, guide-strand 5'->3'")
     tracr: str = "Chen2013"
+    cache: bool = True
 
 
 class ScoreResponse(BaseModel):
@@ -182,7 +197,8 @@ async def score(req: ScoreRequest) -> ScoreResponse:
     if not req.contexts:
         return ScoreResponse(scores=[], available=True)
 
-    scores = await asyncio.to_thread(_score_uncached, req.contexts, tracr)
+    scorer = _score_uncached if req.cache else _score_private
+    scores = await asyncio.to_thread(scorer, req.contexts, tracr)
     return ScoreResponse(
         scores=scores,
         available=_predict_seq is not None,

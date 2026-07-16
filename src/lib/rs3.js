@@ -15,7 +15,7 @@ export function cachedScore(context, tracr) {
  * Resolves to `{ scores: Map<context, number|null>, available, detail }`.
  * A missing or broken service is not an error — it just means no scores.
  */
-export async function scoreContexts(contexts, tracr, signal) {
+export async function scoreContexts(contexts, tracr, signal, serverCache = true) {
   const unique = [...new Set(contexts)]
   const scores = new Map()
   const missing = []
@@ -33,7 +33,7 @@ export async function scoreContexts(contexts, tracr, signal) {
     const res = await fetch('/api/score', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contexts: missing, tracr }),
+      body: JSON.stringify({ contexts: missing, tracr, cache: serverCache }),
       signal,
     })
     if (!res.ok) throw new Error(`scoring service returned ${res.status}`)
