@@ -2,8 +2,8 @@ import { isValidPattern } from '../lib/bio.js'
 import { genomesByOrganism } from '../lib/genome.js'
 
 const EXAMPLES = {
-  'human-grch38': ['LTBR', 'PCSK9'],
-  'human-grch37': ['LTBR', 'PCSK9'],
+  'human-grch38': ['PCSK9', 'rs11591147'],
+  'human-grch37': ['PCSK9', 'rs11591147'],
   'mouse-grcm39': ['Ltbr', 'Pcsk9'],
 }
 
@@ -17,6 +17,7 @@ export default function Controls({
   const pamOk = isValidPattern(pam)
   const examples = EXAMPLES[genomeId] ?? []
   const queryOk = customMode || query.trim().length > 0
+  const rsidQuery = /^rs\d+$/i.test(query.trim())
 
   return (
     <form
@@ -24,32 +25,34 @@ export default function Controls({
       onSubmit={(e) => { e.preventDefault(); if (!customMode && queryOk && pamOk && loadChanged && !loading) onSearch() }}
     >
       <a className="controlbrand" href="/" aria-label="RetroEdit home">RetroEdit</a>
-      <label className="field genome">
-        <span>Genome</span>
-        <select value={genomeId} onChange={(e) => onGenome(e.target.value)}>
-          {genomesByOrganism().map(([organism, builds]) => (
-            <optgroup key={organism} label={organism}>
-              {builds.map((g) => (
-                <option key={g.id} value={g.id}>{g.assembly}{g.note ? ` (${g.note})` : ''}</option>
-              ))}
-            </optgroup>
-          ))}
-        </select>
-      </label>
-
-      <label className="customupload" title="Upload FASTA or plain DNA; maximum 10,000 bases">
-        Upload custom DNA
-        <input
-          type="file"
-          accept=".fa,.fasta,.fna,.fas,.txt,text/plain"
-          disabled={loading}
-          onChange={(event) => {
-            const file = event.target.files?.[0]
-            event.target.value = ''
-            if (file) onCustomUpload(file)
-          }}
-        />
-      </label>
+      <div className="field genome">
+        <div className="genomeinputs">
+          <select value={genomeId} onChange={(e) => onGenome(e.target.value)} aria-label="Genome">
+            {genomesByOrganism().map(([organism, builds]) => (
+              <optgroup key={organism} label={organism}>
+                {builds.map((g) => (
+                  <option key={g.id} value={g.id}>{g.assembly}{g.note ? ` (${g.note})` : ''}</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+          <div className="customuploadwrap">
+            <label className="customupload" title={'FASTA: >sequence_name followed by DNA on the next line, or a plain DNA text file. Maximum 10,000 bases.'}>
+              Upload Sequence
+              <input
+                type="file"
+                accept=".fa,.fasta,.fna,.fas,.txt,text/plain"
+                disabled={loading}
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  event.target.value = ''
+                  if (file) onCustomUpload(file)
+                }}
+              />
+            </label>
+          </div>
+        </div>
+      </div>
 
       {customMode ? (
         <div className="customsummary">
@@ -60,7 +63,7 @@ export default function Controls({
       ) : (
         <div className="field grow">
           <div className="fieldlabelrow">
-            <label htmlFor="gene-or-locus">Gene or locus</label>
+            <label htmlFor="gene-or-locus">Gene, ENSG ID, locus, or rsID</label>
             <span className="examplechips" aria-label="Example genes and loci">
               <span className="examplelabel">Examples</span>
               {examples.map((example) => (
@@ -76,7 +79,7 @@ export default function Controls({
           <input
             id="gene-or-locus"
             value={query}
-            placeholder="BRCA2  ·  ENSG00000139618  ·  chr13:32,315,717-32,315,767"
+            placeholder="PCSK9  ·  ENSG00000169174  ·  chr1:55,039,445–55,064,852  ·  rs11591147"
             onChange={(e) => onQuery(e.target.value)}
             spellCheck={false}
           />
@@ -97,7 +100,7 @@ export default function Controls({
 
       {!customMode && (
         <button type="submit" className="go" disabled={loading || !queryOk || !pamOk || !loadChanged}>
-          Load
+          {loading && rsidQuery ? 'Resolving rsID...' : 'Load'}
         </button>
       )}
     </form>

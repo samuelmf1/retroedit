@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 export default function GuideTable({
   guides, hasEdits, scorable, rs3Available, rs3Model, onRs3Model, selectedGuideId, onSelect,
-  checked, onToggle, onToggleAll, onExport, offAvailable, variantWarn, showOffTargets = true,
+  checked, onToggle, onToggleAll, offAvailable, variantWarn, showOffTargets = true,
 }) {
   const [sort, setSort] = useState(null)
   const selectedRowRef = useRef(null)
@@ -34,8 +34,6 @@ export default function GuideTable({
         <div className="exportgroup">
           <span className="selcount">{nChecked} selected</span>
           {sort && <button type="button" className="restoreorder" onClick={() => setSort(null)}>Restore recommended order</button>}
-          <button disabled={!nChecked} onClick={() => onExport('fasta')}>FASTA</button>
-          <button disabled={!nChecked} onClick={() => onExport('tsv')}>TSV</button>
         </div>
       </header>
 
@@ -62,9 +60,8 @@ export default function GuideTable({
       )}
       {pendingCount > 0 && (
         <div className="guidependingnote" role="status">
-          <span className="pendingbadge">Export locked</span>
           <strong>{pendingCount} pending</strong>
-          <span>Preview is available; export selection unlocks as each guide finishes.</span>
+          <span>Preview is available. Ability to select guides unlocks as each finishes.</span>
         </div>
       )}
 

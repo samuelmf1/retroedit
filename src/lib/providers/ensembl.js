@@ -8,8 +8,8 @@ async function getJson(url) {
   const res = await fetch(url, { headers: { Accept: 'application/json' } })
   if (!res.ok) {
     let detail = ''
-    try { detail = (await res.json())?.error ?? '' } catch { /* body was not json */ }
-    throw new Error(detail || `Ensembl returned ${res.status} ${res.statusText}`)
+    try { const payload = await res.json(); detail = payload?.error ?? payload?.detail ?? '' } catch { /* body was not json */ }
+    throw new Error(detail || `Request returned ${res.status} ${res.statusText}`)
   }
   return res.json()
 }
@@ -44,6 +44,14 @@ export const ensemblProvider = registerProvider('ensembl', {
       canonical: g.canonical_transcript ?? null,
       description: g.description ?? '',
     }
+  },
+
+  async lookupVariant(genome, term) {
+    const data = await getJson(
+      `/api/genomics/variant-location?assembly=${encodeURIComponent(genome.assembly)}` +
+        `&rsid=${encodeURIComponent(term.trim())}`,
+    )
+    return { ...data, chrom: normalizeChrom(data.chrom) }
   },
 
   async fetchSequence(genome, chrom, start, end) {

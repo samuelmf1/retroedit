@@ -285,6 +285,109 @@ def status() -> dict:
     }
 
 
+# ---- rsID resolution --------------------------------------------------------
+
+NCBI_REFSNP_URL = "https://api.ncbi.nlm.nih.gov/variation/v0/refsnp/{rsid}"
+RSID_TIMEOUT = float(os.environ.get("RSID_TIMEOUT", "2"))
+ASSEMBLY_PREFIX = {"GRCh38": "GRCh38", "GRCh37": "GRCh37", "GRCm39": "GRCm39"}
+
+
+def _refseq_chromosome(seq_id: str, assembly: str) -> Optional[str]:
+    accession = seq_id.split(".", 1)[0]
+    if accession == "NC_012920" and assembly.startswith("GRCh"):
+        return "MT"
+    if accession == "NC_005089" and assembly == "GRCm39":
+        return "MT"
+    match = re.fullmatch(r"NC_(\d{6})", accession)
+    if not match:
+        return None
+    number = int(match.group(1))
+    if assembly.startswith("GRCh"):
+        if 1 <= number <= 22:
+            return str(number)
+        return {23: "X", 24: "Y"}.get(number)
+    if assembly == "GRCm39":
+        if 67 <= number <= 85:
+            return str(number - 66)
+        return {86: "X", 87: "Y"}.get(number)
+    return None
+
+
+@lru_cache(maxsize=4096)
+def _ncbi_rsid_location(assembly: str, rs_number: str) -> dict:
+    request = Request(
+        NCBI_REFSNP_URL.format(rsid=rs_number),
+        headers={"Accept": "application/json", "User-Agent": "RetroEdit/1.0"},
+    )
+    try:
+        with urlopen(request, timeout=RSID_TIMEOUT) as response:
+            payload = json.load(response)
+    except HTTPError as exc:
+        if exc.code == 404:
+            raise ValueError(f"rs{rs_number} was not found in dbSNP") from exc
+        raise RuntimeError(f"NCBI RefSNP returned HTTP {exc.code}") from exc
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError("NCBI RefSNP lookup is temporarily unavailable") from exc
+
+    merged_into = payload.get("merged_snapshot_data", {}).get("merged_into", [])
+    if merged_into:
+        return _ncbi_rsid_location(assembly, str(merged_into[0]))
+
+    assembly_prefix = ASSEMBLY_PREFIX.get(assembly)
+    if not assembly_prefix:
+        raise ValueError(f"rsID lookup does not support {assembly}")
+    placements = payload.get("primary_snapshot_data", {}).get("placements_with_allele", [])
+    for placement in placements:
+        annotation = placement.get("placement_annot", {})
+        if annotation.get("seq_type") != "refseq_chromosome":
+            continue
+        traits = annotation.get("seq_id_traits_by_assembly", [])
+        if not any(
+            str(trait.get("assembly_name", "")).startswith(assembly_prefix)
+            and trait.get("is_top_level") and not trait.get("is_alt") and not trait.get("is_patch")
+            for trait in traits
+        ):
+            continue
+        chrom = _refseq_chromosome(placement.get("seq_id", ""), assembly)
+        alleles = placement.get("alleles", [])
+        if not chrom or not alleles:
+            continue
+        spdis = [item.get("allele", {}).get("spdi", {}) for item in alleles]
+        reference = spdis[0]
+        if not isinstance(reference.get("position"), int):
+            continue
+        start = reference["position"] + 1
+        deleted = str(reference.get("deleted_sequence", ""))
+        inserted = []
+        for spdi in spdis:
+            allele = str(spdi.get("inserted_sequence", ""))
+            if allele not in inserted:
+                inserted.append(allele)
+        return {
+            "id": f"rs{payload.get('refsnp_id', rs_number)}",
+            "chrom": chrom,
+            "start": start,
+            "end": start + max(1, len(deleted)) - 1,
+            "strand": -1 if annotation.get("is_aln_opposite_orientation") else 1,
+            "alleles": "/".join(inserted) or None,
+            "source": "NCBI dbSNP",
+        }
+    raise ValueError(f"No {assembly} chromosome mapping for rs{rs_number}")
+
+
+@router.get("/variant-location")
+def variant_location(assembly: str, rsid: str) -> dict:
+    match = re.fullmatch(r"rs(\d+)", rsid.strip(), re.IGNORECASE)
+    if not match:
+        raise HTTPException(status_code=422, detail="enter an rsID such as rs11591147")
+    try:
+        return _ncbi_rsid_location(assembly, match.group(1))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 # ---- variants ---------------------------------------------------------------
 
 class Variant(BaseModel):

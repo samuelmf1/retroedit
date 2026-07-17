@@ -41,7 +41,7 @@
 
 /* ---- controls ---- */
 .controls {
-  display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
+  display: flex; gap: 22px; align-items: center; flex-wrap: wrap;
   padding: 12px 18px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
@@ -58,7 +58,7 @@
 .field.grow { flex: 1; min-width: 260px; }
 .controls .field.grow { flex: 0 1 auto; min-width: 0; }
 .field.grow > input { flex: 1; min-width: 0; }
-.controls .field.grow > input { flex: 0 1 22vw; width: 22vw; min-width: 260px; }
+.controls .field.grow > input { flex: 0 1 34vw; width: 34vw; min-width: 360px; max-width: 720px; }
 .fieldlabelrow { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; flex: none; flex-wrap: nowrap; }
 .fieldlabelrow > label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
 .examplechips { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
@@ -70,13 +70,17 @@
 .examplechip:hover { border-color: var(--accent); background: var(--accent-weak); color: var(--accent); }
 .examplechip:disabled { opacity: 1; cursor: wait; }
 .field.small input { width: 78px; text-transform: uppercase; letter-spacing: 1px; font-family: var(--mono); }
-.field.genome select { max-width: 210px; }
+.field.genome { gap: 10px; }
+.genomeinputs { display: inline-flex; align-items: stretch; }
+.genomeinputs select { width: 180px; max-width: 210px; border-radius: 7px 0 0 7px; }
+.customuploadwrap { flex: none; display: flex; margin-left: -1px; }
 .customupload {
   flex: none; display: inline-flex; align-items: center; min-height: 34px; padding: 0 11px;
-  border: 1px dashed #9eb1c5; border-radius: 7px; background: #f7f9fc;
-  color: #52677b; font-size: 11px; font-weight: 700; cursor: pointer;
+  border: 1px solid var(--line-strong); border-radius: 0 7px 7px 0; background: #f7f9fc;
+  color: #52677b; font-size: 11px; font-weight: 700; white-space: nowrap; cursor: pointer;
 }
-.customupload:hover { border-color: var(--accent); background: var(--accent-weak); color: var(--accent); }
+.customupload:hover { position: relative; border-color: var(--accent); background: var(--accent-weak); color: var(--accent); }
+.customupload:focus-within { position: relative; outline: 2px solid color-mix(in srgb, var(--accent) 35%, transparent); outline-offset: 1px; }
 .customupload input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .customsummary { flex: 1 1 260px; min-width: 220px; display: flex; flex-direction: column; gap: 2px; }
 .customsummary strong { color: var(--ink); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -110,23 +114,24 @@
 /* Overview, navigation, and annotation controls share the locus row. */
 .featureribbon {
   width: 100%; min-width: 0;
-  display: grid; grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 1fr);
-  grid-template-rows: auto auto; column-gap: 12px; row-gap: 6px; align-items: center;
+  display: grid; grid-template-columns: auto auto minmax(180px, 1fr);
+  grid-template-rows: auto; column-gap: 12px; align-items: center;
 }
-.featureribbon.noexon { grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 1fr); }
-.locusidentity { grid-column: 2; grid-row: 1;
-  min-width: max-content; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; line-height: 1;
+.featureribbon.noexon { grid-template-columns: auto minmax(180px, 1fr); }
+.locusidentity { grid-column: 1; grid-row: 1;
+  min-width: max-content; max-width: 240px; display: flex; flex-direction: column;
+  align-items: flex-start; justify-content: center; line-height: 1;
 }
-.locusidentity strong { font-size: 15px; line-height: 16px; }
+.locusidentity strong { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; line-height: 16px; }
 .locusidentity .genomebar-strand { margin: 2px 0 0; font-size: 8.5px; line-height: 13px; }
 .overviewslot {
-  grid-column: 1 / -1; grid-row: 2; width: min(88%, 1440px); justify-self: center;
+  grid-column: 3; grid-row: 1; width: 100%; justify-self: stretch;
   min-width: 0; min-height: 34px; padding: 4px 10px 5px;
   border: 1px solid var(--line); border-radius: 9px; background: #f8fafc;
   box-shadow: inset 0 1px 0 #fff, 0 1px 3px #243b5312;
   transition: border-color 140ms ease, box-shadow 140ms ease;
 }
+.featureribbon.noexon .overviewslot { grid-column: 2; }
 .frgroup { display: flex; gap: 5px; align-items: center; }
 .annotationsgroup { grid-column: 4; grid-row: 1; justify-self: end; }
 .frlabel { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-right: 2px; }
@@ -140,11 +145,11 @@
 .mafslider { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 9.5px; font-weight: 700; white-space: nowrap; }
 .mafslider input[type="range"] { width: 76px; height: 14px; margin: 0; accent-color: var(--accent); cursor: pointer; }
 .mafslider output { min-width: 48px; color: var(--ink); font-size: 9.5px; font-variant-numeric: tabular-nums; }
-.exonnav { grid-column: 3; grid-row: 1;
+.exonnav { grid-column: 2; grid-row: 1;
   position: static; transform: none;
   display: inline-flex; align-items: center; gap: 4px; z-index: 2;
 }
-.exonnav .frchip { padding-left: 7px; padding-right: 7px; }
+.exonnav .frchip { padding: 4px 7px; }
 .exonnav .exonarrow { min-width: 28px; font-size: 14px; line-height: 14px; }
 .exonnav .exonjump { color: var(--ink); background: #f7f9fc; }
 .exonnav .exonpan {
@@ -163,6 +168,9 @@
   box-shadow: 0 6px 20px #0002; padding: 8px; width: 230px;
 }
 .biotypepop .btlink { font-size: 11px; padding: 2px 6px; margin-right: 4px; }
+.clinvarpop { left: auto; right: 0; width: 280px; }
+.filterlinks { display: flex; gap: 4px; margin-bottom: 5px; }
+.clinvarpop .btrow span { line-height: 1.2; }
 .btlist { max-height: 240px; overflow-y: auto; margin-top: 6px; display: flex; flex-direction: column; gap: 2px; }
 .btrow { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink); padding: 1px 2px; cursor: pointer; }
 .btrow input { margin: 0; }
@@ -266,6 +274,7 @@
 .mocksequence { --mock-label: 84px; margin-top: 54px; padding: 16px 18px; border: 1px solid var(--line); border-radius: 9px; background: #f8fafc; overflow: hidden; color: #526272; }
 .mocktrackrow { display: grid; grid-template-columns: var(--mock-label) minmax(0, 1fr); gap: 10px; align-items: center; }
 .mocktrackrow > b, .mockannotationlane > b { color: var(--muted); font: 700 9px/1.2 var(--sans); text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+.mockvariantrow { margin-top: 8px; }
 .mockvariants { display: flex; align-items: center; gap: 6px; min-width: 0; font: 700 9px/1.2 var(--sans); }
 .mockvariants span { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 8px; white-space: nowrap; }
 .mockvariants span::before { content: ""; flex: none; width: 7px; height: 7px; border: 1px solid #fff; border-radius: 50%; box-shadow: 0 0 0 1px currentColor; background: currentColor; }
@@ -595,7 +604,7 @@
 .vartrack { position: relative; }
 .vmark {
   position: absolute; bottom: 0; width: 8px; height: 8px; border-radius: 50%;
-  transform: translateX(-4px); cursor: pointer; border: 1px solid #fff;
+  transform: translateX(-4px); cursor: default; border: 1px solid #fff;
   box-shadow: 0 0 0 1px rgba(30, 41, 59, 0.16);
 }
 .vmark::before { content: ''; position: absolute; left: 3px; top: 7px; width: 1px; height: 4px; background: currentColor; }
@@ -611,12 +620,21 @@
 .vmark.clinvar.clin-other { background: #6f7c89; color: #6f7c89; }
 .varianttip {
   position: fixed; z-index: 1000; display: grid; gap: 3px;
-  width: max-content; max-width: 320px; padding: 9px 11px;
+  width: max-content; max-width: 320px; padding: 9px 38px 9px 11px;
   border: 1px solid #c9d3de; border-left: 4px solid #6f7c89; border-radius: 7px;
   background: #fff; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.2);
-  color: var(--ink); font-size: 11px; line-height: 1.35; pointer-events: none;
+  color: var(--ink); font-size: 11px; line-height: 1.35; pointer-events: auto;
 }
 .varianttip-title { font-weight: 800; }
+.varianttiplink {
+  position: absolute; top: 7px; right: 7px; width: 24px; height: 24px;
+  display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 6px;
+  background: #f7f9fc; color: var(--accent); font-size: 15px; font-weight: 800;
+  line-height: 1; text-decoration: none; cursor: pointer;
+}
+.varianttiplink:hover, .varianttiplink:focus-visible {
+  border-color: var(--accent); background: var(--accent-weak); outline: none;
+}
 .varianttip.gnomad.common, .varianttip.clinvar.clin-pathogenic { border-left-color: #c62828; }
 .varianttip.gnomad.rare { border-left-color: #5b8db8; }
 .varianttip.clinvar.clin-uncertain { border-left-color: #d58a00; }
@@ -733,6 +751,24 @@
 .armslider-thumb:focus-visible { outline: 2px solid var(--accent-weak); }
 .armslider-thumb.left { border-color: var(--fwd); }
 .armslider-thumb.right { border-color: var(--rev); }
+.armratio { display: flex; align-items: center; gap: 4px; margin-top: 9px; }
+.armratio > span { margin-right: 2px; color: var(--muted); font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
+.armratio button { padding: 2px 8px; border-radius: 999px; color: var(--muted); font-size: 10.5px; font-weight: 700; }
+.armratio button b { color: inherit; font-variant-numeric: tabular-nums; }
+.armratio button.active { border-color: var(--accent); background: var(--accent-weak); color: var(--accent); }
+.armratio small { color: var(--muted); font-size: 9.5px; }
+.armratiooption { position: relative; display: inline-flex; }
+.armratiotip {
+  position: absolute; z-index: 20; left: 50%; bottom: 100%; width: 260px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px;
+  background: #172331; color: #f7f9fc; box-shadow: 0 5px 16px #0003;
+  font-size: 10.5px; font-weight: 500; line-height: 1.35; text-transform: none;
+  letter-spacing: normal; transform: translateX(-50%); opacity: 0; visibility: hidden;
+  pointer-events: none; transition: opacity 120ms ease;
+}
+.armratiotip a { display: block; margin-top: 4px; color: #9fc0ff; font-weight: 700; }
+.armratiooption:hover .armratiotip,
+.armratiooption:focus-within .armratiotip { opacity: 1; visibility: visible; pointer-events: auto; }
 
 /* donor panel */
 .donorctl { display: flex; gap: 16px; padding: 12px 14px; align-items: flex-end; flex-wrap: wrap; }
@@ -789,3 +825,92 @@
   .overviewslot { width: calc(100% - 24px); }
   .annotationsgroup { grid-column: 1 / -1; grid-row: 3; justify-self: end; }
 }
+
+/* designed plasmid viewer */
+.plasmidopen { margin-left: auto; border-color: #a9c3f8; background: #edf3ff; color: var(--accent); font-size: 11px; font-weight: 700; padding: 5px 9px; }
+.plasmidopen:hover:not(:disabled) { background: #dce8ff; }
+.plasmidmodal { position: fixed; inset: 0; z-index: 2000; display: flex; flex-direction: column; background: #f5f7fa; color: var(--ink); }
+.plasmidmodalhead { min-height: 58px; padding: 0 20px; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 20px; background: #fff; border-bottom: 1px solid var(--line); box-shadow: 0 2px 8px #23344b14; }
+.plasmidmodalhead > div { display: flex; align-items: baseline; gap: 10px; }
+.plasmidmodalhead > div strong { font-size: 17px; }
+.plasmidmodalhead > div span { color: var(--muted); font-size: 12px; }
+.plasmidmodalhead nav { display: flex; gap: 3px; padding: 3px; border: 1px solid var(--line); background: #f4f6f9; border-radius: 9px; }
+.plasmidmodalhead nav button { min-width: 88px; padding: 6px 14px; border: 0; background: transparent; font-weight: 700; }
+.plasmidmodalhead nav button.active { background: #fff; color: var(--accent); box-shadow: 0 1px 4px #25355024; }
+.plasmidclose { justify-self: end; width: 36px; height: 36px; padding: 0; border-radius: 50%; font-size: 25px; line-height: 1; color: var(--muted); }
+.plasmidmodalbody { min-height: 0; flex: 1; overflow: auto; }
+.plasmidmaplayout { min-height: 100%; display: grid; grid-template-columns: minmax(540px, 1fr) 320px; gap: 24px; padding: 22px 28px; }
+.plasmidmap { width: min(100%, 820px); height: calc(100vh - 105px); min-height: 620px; justify-self: center; overflow: visible; }
+.plasmidtick { fill: #64748b; font: 10px var(--sans); }
+.plasmidfeature { cursor: pointer; outline: none; }
+.plasmidfeature path { transition: stroke-width 120ms ease, opacity 120ms ease; }
+.plasmidfeature:hover path, .plasmidfeature.active path { stroke-width: 24px; }
+.plasmidfeaturelabel { font: 600 11px var(--sans); }
+.plasmidname { fill: var(--ink); font: 700 17px var(--sans); }
+.plasmidsize { fill: var(--muted); font: 12px var(--sans); }
+.plasmidlegend { align-self: center; max-height: calc(100vh - 120px); overflow: auto; padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: #fff; box-shadow: 0 8px 30px #20334c12; }
+.plasmidlegend h3 { margin: 0 0 12px; font-size: 14px; }
+.plasmidfeaturelist { display: grid; gap: 3px; }
+.plasmidfeaturelist button { display: grid; grid-template-columns: 11px 1fr auto; align-items: center; gap: 9px; width: 100%; padding: 7px 8px; border-color: transparent; text-align: left; }
+.plasmidfeaturelist button:hover, .plasmidfeaturelist button.active { background: #f0f4f9; border-color: var(--line); }
+.plasmidfeaturelist i, .sequencelegend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
+.plasmidfeaturelist span { display: grid; gap: 1px; min-width: 0; font-size: 11.5px; font-weight: 600; }
+.plasmidfeaturelist small { color: var(--muted); font-size: 9px; font-weight: 500; }
+.plasmidfeaturelist em { color: var(--muted); font-size: 10px; font-style: normal; font-variant-numeric: tabular-nums; }
+.plasmiddetail { display: grid; gap: 3px; margin-top: 14px; padding: 11px; border-radius: 9px; background: #f5f7fa; font-size: 11px; }
+.plasmiddetail span { color: var(--muted); }
+.plasmidsequence { min-height: 100%; padding: 24px; }
+.sequencelegend { position: sticky; top: 0; z-index: 1; display: flex; justify-content: center; gap: 18px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; box-shadow: 0 2px 8px #20334c12; font-size: 11px; font-weight: 700; }
+.sequencelegend span { display: flex; align-items: center; gap: 6px; }
+.sequencebody { width: min(100%, 960px); margin: 20px auto; display: grid; gap: 9px; }
+.plasmidseqrow { display: grid; grid-template-columns: 55px 1fr 55px; column-gap: 12px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #e5eaf0; }
+.seqcoord { grid-row: 1 / 3; color: var(--muted); font-size: 10px; text-align: right; font-variant-numeric: tabular-nums; }
+.seqcoord.end { grid-column: 3; }
+.plasmidbases { grid-column: 2; white-space: pre; font: 600 14px/1.65 var(--mono); letter-spacing: .06em; }
+.plasmidbases.bottom { color: #9aa9ba; }
+.plasmidbases span { border-radius: 2px; }
+.plasmidloading, .plasmiderror { margin: 15vh auto; width: fit-content; padding: 18px 24px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.plasmiderror { color: var(--del); }
+@media (max-width: 900px) { .plasmidmaplayout { grid-template-columns: 1fr; } .plasmidmap { height: auto; min-height: 520px; } .plasmidlegend { width: min(100%, 520px); justify-self: center; } }
+.donoractions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; padding: 11px 14px; border-top: 1px solid var(--line); background: #fafbfd; }
+.donoractions .plasmidopen { margin-left: 0; }
+.libraryadd { border-color: var(--accent); background: var(--accent); color: #fff; font-size: 11px; font-weight: 700; padding: 5px 10px; }
+.libraryadd:hover:not(:disabled) { background: #245ed0; }
+.libraryadd.added:disabled { border-color: #8ecdb8; background: #e1f4ed; color: #17795e; opacity: 1; }
+.librarynote { color: var(--muted); font-size: 10px; }
+.donoractionsleft, .donorexports { display: flex; align-items: center; gap: 8px; }
+.donorexports { margin-left: auto; }
+.donorexports > span { color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.donorexports button { min-width: 56px; padding: 5px 9px; font-size: 10.5px; font-weight: 700; }
+
+/* interactive plasmid map */
+.plasmidmapview { min-height: 100%; }
+.plasmidmaptoolbar { position: sticky; top: 0; z-index: 4; min-height: 54px; display: flex; align-items: center; gap: 16px; padding: 8px 20px; border-bottom: 1px solid var(--line); background: #f9fbfded; backdrop-filter: blur(10px); }
+.plasmidmaptoolbar > span { color: var(--muted); font-size: 11px; }
+.mapmodes { display: flex; flex: none; gap: 3px; padding: 3px; border: 1px solid #cad5e2; border-radius: 9px; background: #eef2f6; }
+.mapmodes button { min-width: 100px; padding: 6px 12px; border: 0; background: transparent; color: var(--muted); font-size: 11px; font-weight: 700; }
+.mapmodes button.active { background: #fff; color: var(--accent); box-shadow: 0 1px 4px #25355026; }
+.cargokeys { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.cargokeys span { display: flex; align-items: center; gap: 5px; color: #526276; font-size: 10px; font-weight: 700; }
+.cargokeys i { width: 9px; height: 9px; border-radius: 3px; }
+.plasmidmaplayout { min-height: calc(100vh - 112px); padding-top: 14px; }
+.plasmidmap.circular { box-sizing: border-box; border: 1px solid #e0e6ed; border-radius: 18px; background: radial-gradient(circle at center, #fff 0 45%, #f8fafc 78%, #f1f5f9 100%); box-shadow: 0 8px 30px #20334c0d; }
+.plasmidmap.linear { align-self: center; width: 100%; height: auto; min-height: 0; padding: 8px; border: 1px solid #dce4ec; border-radius: 16px; background: #fff; box-shadow: 0 8px 30px #20334c0d; }
+.linearbackbone { stroke: #25313e; stroke-width: 5; stroke-linecap: round; }
+.lineartick { stroke: #738297; stroke-width: 1.5; }
+.featureleader { stroke: #bdc8d4; stroke-width: 1; stroke-dasharray: 3 3; }
+.linearfeature { cursor: pointer; outline: none; }
+.linearfeature rect { stroke: #fff; stroke-width: 2; transition: filter 120ms ease, stroke-width 120ms ease; }
+.linearfeature:hover rect { filter: brightness(.94); stroke: #203040; stroke-width: 3; }
+.linearfeature.active rect { filter: drop-shadow(0 2px 3px #1d2b3d44); stroke: var(--accent); stroke-width: 4; }
+.linearfeaturelabel { fill: #344256; font: 600 10px var(--sans); }
+.linearend { fill: #64748b; font: 600 11px var(--sans); }
+.plasmidlegendhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.plasmidlegendhead h3 { margin: 0; }
+.plasmidlegendhead > span { min-width: 22px; padding: 2px 6px; border-radius: 999px; background: #eaf0f6; color: #56677b; font-size: 10px; font-weight: 800; text-align: center; }
+.plasmidfeaturelist button { grid-template-columns: 11px minmax(0, 1fr) auto auto; }
+.plasmidfeaturelist b, .plasmiddetail b { padding: 2px 5px; border-radius: 999px; background: #e4edff; color: var(--accent); font-size: 8px; letter-spacing: .04em; }
+.plasmiddetail > div { display: flex; align-items: center; gap: 7px; }
+.plasmiddetail i { width: 10px; height: 10px; border-radius: 3px; }
+@media (max-width: 1050px) { .cargokeys { display: none; } .plasmidmaptoolbar > span { margin-left: auto; } }
+@media (max-width: 700px) { .plasmidmaptoolbar { align-items: flex-start; flex-direction: column; gap: 6px; } .plasmidmaptoolbar > span { margin-left: 0; } .mapmodes { width: 100%; } .mapmodes button { flex: 1; } }

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { CLINVAR_CATEGORIES } from '../lib/variants.js'
 
 export const DEFAULT_GNOMAD_MAF = 1e-5
 const GNOMAD_MAF_STEPS = [
@@ -70,6 +71,10 @@ export function AnnotationControls({
       <Chip active={opts.clinvar} disabled={!clinvarOk}
         title={clinvarOk ? 'Show or hide ClinVar clinical annotations' : 'ClinVar annotations are unavailable for this genome'}
         onClick={() => setTrack('clinvar')}>ClinVar</Chip>
+      {opts.clinvar && (
+        <ClinvarMenu selected={opts.clinvarSignificances}
+          onChange={(selected) => onChange({ ...opts, clinvarSignificances: selected })} />
+      )}
     </div>
   )
 }
@@ -84,6 +89,26 @@ export default function FeatureRibbon({
     ? `Exon ${currentExon.rank ?? exonNav.index + 1} / ${exonNav.exons.length}`
     : ''
 
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (navigationDisabled || event.repeat || event.metaKey || event.ctrlKey || event.altKey) return
+      const target = event.target
+      if (target?.isContentEditable || target?.closest?.('input, textarea, select, .viewer-scroll, [role="dialog"]')) return
+
+      const key = event.key.toLowerCase()
+      let action = null
+      if (key === 'q') action = onPanLeft
+      else if (key === 'd') action = onPanRight
+      else if (key === 'w' && currentExon && exonNav.index > 0) action = onPreviousExon
+      else if (key === 's' && currentExon && exonNav.index < exonNav.exons.length - 1) action = onNextExon
+      if (!action) return
+
+      event.preventDefault()
+      action()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [currentExon, exonNav, navigationDisabled, onNextExon, onPanLeft, onPanRight, onPreviousExon])
 
   return (
     <div className={`featureribbon${navigationDisabled ? ' loading' : ''}${!currentExon ? ' noexon' : ''}`}>
@@ -101,7 +126,7 @@ export default function FeatureRibbon({
             type="button"
             className="frchip exonarrow exonpan"
             disabled={navigationDisabled}
-            title="Move left by one window"
+            title="Move left by one window (Q)"
             aria-label="Move left by one window"
             onClick={onPanLeft}
           >←</button>
@@ -109,7 +134,7 @@ export default function FeatureRibbon({
             type="button"
             className="frchip exonarrow exonjump"
             disabled={navigationDisabled || exonNav.index <= 0}
-            title="Jump to previous canonical exon"
+            title="Jump to previous canonical exon (W)"
             aria-label="Jump to previous canonical exon"
             onClick={onPreviousExon}
           >⇤</button>
@@ -124,7 +149,7 @@ export default function FeatureRibbon({
             type="button"
             className="frchip exonarrow exonjump"
             disabled={navigationDisabled || exonNav.index >= exonNav.exons.length - 1}
-            title="Jump to next canonical exon"
+            title="Jump to next canonical exon (S)"
             aria-label="Jump to next canonical exon"
             onClick={onNextExon}
           >⇥</button>
@@ -132,7 +157,7 @@ export default function FeatureRibbon({
             type="button"
             className="frchip exonarrow exonpan"
             disabled={navigationDisabled}
-            title="Move right by one window"
+            title="Move right by one window (D)"
             aria-label="Move right by one window"
             onClick={onPanRight}
           >→</button>
@@ -180,6 +205,55 @@ function BiotypeMenu({ biotypes, selected, onChange }) {
               <label key={b} className="btrow">
                 <input type="checkbox" checked={has(b)} onChange={() => toggle(b)} />
                 {b.replace(/_/g, ' ')}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ClinvarMenu({ selected, onChange }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  const isAll = selected == null
+  const count = isAll ? CLINVAR_CATEGORIES.length : selected.size
+
+  useEffect(() => {
+    if (!open) return undefined
+    const onDocument = (event) => {
+      if (ref.current && !ref.current.contains(event.target)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDocument)
+    return () => document.removeEventListener('mousedown', onDocument)
+  }, [open])
+
+  const toggle = (id) => {
+    const next = new Set(isAll ? CLINVAR_CATEGORIES.map((category) => category.id) : selected)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    onChange(next.size === CLINVAR_CATEGORIES.length ? null : next)
+  }
+
+  return (
+    <div className="biotypemenu clinvarmenu" ref={ref}>
+      <button type="button" className="frchip" aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}>
+        Significance ({isAll ? 'all' : `${count}/${CLINVAR_CATEGORIES.length}`}) ▾
+      </button>
+      {open && (
+        <div className="biotypepop clinvarpop">
+          <div className="filterlinks">
+            <button type="button" className="btlink" onClick={() => onChange(null)}>All</button>
+            <button type="button" className="btlink" onClick={() => onChange(new Set())}>None</button>
+          </div>
+          <div className="btlist">
+            {CLINVAR_CATEGORIES.map((category) => (
+              <label className="btrow" key={category.id}>
+                <input type="checkbox" checked={isAll || selected.has(category.id)}
+                  onChange={() => toggle(category.id)} />
+                <span>{category.label}</span>
               </label>
             ))}
           </div>

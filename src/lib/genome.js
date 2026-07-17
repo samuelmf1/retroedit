@@ -27,20 +27,21 @@ registerGenome({
 export const DEFAULT_GENOME_ID = 'human-grch38'
 
 const REGION_RE = /^(?:chr)?([0-9]{1,2}|[XYxy]|MT|mt|M|m):([\d,_ ]+)(?:\s*(?:\.\.|-|–)\s*([\d,_ ]+))?$/
+const RSID_RE = /^rs\d+$/i
 const clean = (n) => Number(String(n).replace(/[,_ ]/g, ''))
 
 /** Padding around an explicitly requested span, so guides just outside it are still reachable. */
 const FOCUS_PAD_BP = 200
 
 /**
- * Turn "BRCA2", "ENSG00000139618", "13:32315717", or "chr13:32,315,717-32,315,767"
+ * Turn "BRCA2", "ENSG00000139618", "rs1801133", "13:32315717", or a coordinate range
  * into a region to load plus the sub-span the user actually asked about.
  *
  * Coordinates are always read in the selected genome's build — there is no liftover.
  */
 export async function resolveLocus(query, genome, windowBp = 700) {
   const term = query.trim()
-  if (!term) throw new Error('Enter a gene symbol or a chrom:position')
+  if (!term) throw new Error('Enter a gene symbol, rsID, or chrom:position')
 
   const match = REGION_RE.exec(term)
   if (match) {
@@ -60,6 +61,27 @@ export async function resolveLocus(query, genome, windowBp = 700) {
     return {
       chrom, start, end: start + span - 1, focus, gene: null,
       label: `${chrom}:${focus.start.toLocaleString()}` + (b != null ? `-${focus.end.toLocaleString()}` : ''),
+    }
+  }
+
+  if (RSID_RE.test(term)) {
+    const provider = getProvider(genome.provider)
+    if (typeof provider.lookupVariant !== 'function') {
+      throw new Error(`rsID lookup is unavailable for ${genome.label}`)
+    }
+    const variant = await provider.lookupVariant(genome, term)
+    const focus = {
+      start: Math.min(variant.start, variant.end),
+      end: Math.max(variant.start, variant.end),
+    }
+    const span = Math.max(windowBp, focus.end - focus.start + 1 + 2 * FOCUS_PAD_BP)
+    const mid = Math.floor((focus.start + focus.end) / 2)
+    const start = Math.max(1, mid - Math.floor(span / 2))
+    return {
+      chrom: variant.chrom, start, end: start + span - 1, focus,
+      gene: null, variant,
+      label: `${variant.id} · ${variant.chrom}:${focus.start.toLocaleString()}` +
+        (focus.end !== focus.start ? `-${focus.end.toLocaleString()}` : ''),
     }
   }
 
@@ -106,7 +128,7 @@ export async function loadRegion({ query, genomeId, windowBp = 700, locus: exact
     reference: {
       genomeId, assembly: genome.assembly, organism: genome.organism,
       chrom: locus.chrom, start: locus.start, end: locus.end,
-      seq: seq.toUpperCase(), label: locus.label, gene: locus.gene,
+      seq: seq.toUpperCase(), label: locus.label, gene: locus.gene, variant: locus.variant ?? null,
     },
     features: empty,
     frame: null,

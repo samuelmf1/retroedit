@@ -12,6 +12,7 @@ import {
 import { createPortal } from 'react-dom'
 import { complementBase } from '../lib/bio.js'
 import { baseStatus } from '../lib/editModel.js'
+import { clinvarCategory } from '../lib/variants.js'
 
 function featureTooltip(f) {
   const lines = [f.name]
@@ -24,20 +25,11 @@ function featureTooltip(f) {
   return lines.join('\n')
 }
 
-function clinvarCategory(v) {
-  const significance = (v.clnsig || '').toLowerCase()
-  if (/conflicting/.test(significance)) return 'conflicting'
-  if (/pathogenic/.test(significance) && !/benign/.test(significance)) return 'pathogenic'
-  if (/uncertain/.test(significance)) return 'uncertain'
-  if (/benign/.test(significance) && !/pathogenic/.test(significance)) return 'benign'
-  if (/drug response|risk factor|association|protective/.test(significance)) return 'association'
-  return 'other'
-}
 
 function variantTooltip(v) {
   if (v.source === 'clinvar') {
     return [
-      `${v.ref} → ${v.alt}${v.id ? ` · ClinVar Variation ID ${v.id}` : ''}`,
+      `${v.ref} → ${v.alt}${v.id ? ` · ClinVar identifier ${v.id}` : ''}`,
       `Position: ${Number(v.pos).toLocaleString()}`,
       v.clnsig ? `Clinical significance: ${v.clnsig}` : 'Clinical significance: not provided',
       v.gold_stars != null && `Review evidence: ${v.gold_stars} star${v.gold_stars === 1 ? '' : 's'}`,
@@ -64,8 +56,24 @@ function fmtAf(af) {
 }
 
 function variantSeverity(v) {
-  if (v.source === 'clinvar') return `clin-${clinvarCategory(v)}`
+  if (v.source === 'clinvar') return `clin-${clinvarCategory(v.clnsig)}`
   return (v.af ?? 0) >= 0.01 ? 'common' : 'rare'
+}
+
+function variantUrl(v, reference) {
+  if (v.source === 'clinvar') {
+    const identifier = String(v.id || '').split(/[;,]/)[0]
+    if (/^[0-9]+$/.test(identifier) || /^VCV[0-9]+(?:\.[0-9]+)?$/i.test(identifier)) {
+      return `https://www.ncbi.nlm.nih.gov/clinvar/variation/${encodeURIComponent(identifier)}/`
+    }
+    const term = identifier || `${formatChrom(reference.chrom)}:${v.pos} ${v.ref}>${v.alt}`
+    return `https://www.ncbi.nlm.nih.gov/clinvar/?term=${encodeURIComponent(term)}`
+  }
+
+  const chrom = String(reference.chrom).replace(/^chr/i, '').replace(/^MT$/i, 'M')
+  const variantId = `${chrom}-${v.pos}-${v.ref}-${v.alt}`
+  const dataset = reference.assembly === 'GRCh37' ? 'gnomad_r2_1' : 'gnomad_r4'
+  return `https://gnomad.broadinstitute.org/variant/${encodeURIComponent(variantId)}?dataset=${dataset}`
 }
 
 // Every base occupies a fixed-width cell, so overlay bars line up with glyphs
@@ -171,6 +179,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     onSelectionChange,
     onSelectGuide,
     onOverviewNavigate,
+    onOverviewGene,
     onOverviewResize,
     onOverviewExon,
     overviewDisabled,
@@ -191,6 +200,20 @@ const SequenceViewer = forwardRef(function SequenceViewer(
   const dragging = useRef(false)
   const overviewDragging = useRef(false)
   const overviewResizing = useRef(null)
+  const variantTipCloseTimer = useRef(null)
+  const cancelVariantTipClose = useCallback(() => {
+    window.clearTimeout(variantTipCloseTimer.current)
+    variantTipCloseTimer.current = null
+  }, [])
+  const showVariantTip = useCallback((v, x, y) => {
+    cancelVariantTipClose()
+    setVariantTip({ v, x, y })
+  }, [cancelVariantTipClose])
+  const scheduleVariantTipClose = useCallback(() => {
+    cancelVariantTipClose()
+    variantTipCloseTimer.current = window.setTimeout(() => setVariantTip(null), 220)
+  }, [cancelVariantTipClose])
+  useEffect(() => cancelVariantTipClose, [cancelVariantTipClose])
 
   const len = edited.length
   const refSeq = reference.seq
@@ -444,6 +467,9 @@ const SequenceViewer = forwardRef(function SequenceViewer(
   }, [locusOverview])
 
   const resizedOverviewRange = useCallback((position, side = overviewResizing.current) => {
+    // Custom DNA has no genome-scale overview. This callback is not exposed in
+    // that mode, but hooks still run while the sequence viewer renders.
+    if (!locusOverview) return { start: reference.start, end: reference.end }
     if (side === 'start') {
       return {
         start: Math.max(locusOverview.start, Math.min(position, reference.end - MIN_OVERVIEW_BP + 1)),
@@ -454,7 +480,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
       start: reference.start,
       end: Math.min(locusOverview.end, Math.max(position, reference.start + MIN_OVERVIEW_BP - 1)),
     }
-  }, [locusOverview.end, locusOverview.start, reference.end, reference.start])
+  }, [locusOverview, reference.end, reference.start])
 
   const handleOverviewPointerDown = useCallback((event) => {
     if (overviewDisabled || event.button !== 0) return
@@ -710,14 +736,15 @@ const SequenceViewer = forwardRef(function SequenceViewer(
                 role="img"
                 tabIndex={0}
                 aria-label={variantTooltip(v).replaceAll('\n', '. ')}
-                onPointerEnter={(event) => setVariantTip({ v, x: event.clientX, y: event.clientY })}
-                onPointerMove={(event) => setVariantTip({ v, x: event.clientX, y: event.clientY })}
-                onPointerLeave={() => setVariantTip(null)}
+                aria-haspopup="dialog"
+                onPointerEnter={(event) => showVariantTip(v, event.clientX, event.clientY)}
+                onPointerMove={(event) => showVariantTip(v, event.clientX, event.clientY)}
+                onPointerLeave={scheduleVariantTipClose}
                 onFocus={(event) => {
                   const box = event.currentTarget.getBoundingClientRect()
-                  setVariantTip({ v, x: box.left + box.width / 2, y: box.bottom })
+                  showVariantTip(v, box.left + box.width / 2, box.bottom)
                 }}
-                onBlur={() => setVariantTip(null)} />
+                onBlur={scheduleVariantTipClose} />
             ))}
           </div>
         )}
@@ -855,9 +882,9 @@ const SequenceViewer = forwardRef(function SequenceViewer(
                 key={element.id || index}
                 className="genomebar-element"
                 style={{ ...element.box, top: element.lane * 14 }}
-                title={`${element.name} · ${element.biotype?.replace(/_/g, ' ') || 'gene'} · click to navigate`}
+                title={`${element.name} · ${element.biotype?.replace(/_/g, ' ') || 'gene'} · click to open gene`}
                 onPointerDown={(event) => event.stopPropagation()}
-                onClick={() => onOverviewNavigate?.(Math.round((element.start + element.end) / 2))}
+                onClick={() => onOverviewGene?.(element)}
               >
                 {element.exonBoxes.map((style, exonIndex) => (
                   <span key={exonIndex} className="genomebar-element-exon" style={style} />
@@ -896,7 +923,10 @@ const SequenceViewer = forwardRef(function SequenceViewer(
       {variantTip && createPortal(
         <div
           className={`varianttip ${variantTip.v.source} ${variantSeverity(variantTip.v)}`}
-          role="tooltip"
+          role="dialog"
+          aria-label={`${variantTip.v.source === 'clinvar' ? 'ClinVar' : 'gnomAD'} variant details`}
+          onPointerEnter={cancelVariantTipClose}
+          onPointerLeave={scheduleVariantTipClose}
           style={{
             left: Math.max(8, Math.min(variantTip.x + 12, window.innerWidth - 330)),
             top: Math.max(8, Math.min(variantTip.y + 14, window.innerHeight - 170)),
@@ -905,6 +935,14 @@ const SequenceViewer = forwardRef(function SequenceViewer(
           {variantTooltip(variantTip.v).split('\n').map((line, index) => (
             <span key={index} className={index === 0 ? 'varianttip-title' : ''}>{line}</span>
           ))}
+          <a className="varianttiplink" href={variantUrl(variantTip.v, reference)}
+            target="_blank" rel="noopener noreferrer"
+            aria-label={`Open in ${variantTip.v.source === 'clinvar' ? 'ClinVar' : 'gnomAD'} (new tab)`}
+            title={`Open in ${variantTip.v.source === 'clinvar' ? 'ClinVar' : 'gnomAD'}`}
+            onFocus={cancelVariantTipClose} onBlur={scheduleVariantTipClose}
+            onClick={() => setVariantTip(null)}>
+            <span aria-hidden="true">↗</span>
+          </a>
         </div>,
         document.body,
       )}

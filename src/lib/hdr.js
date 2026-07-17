@@ -296,6 +296,35 @@ export function designDonor({
     }
     track.push({ base, ref: r, role })
   }
+  // Advisory design checks. All requested and PAM/seed-disrupting changes
+  // interrupt homology, so measure the unchanged sequence outside the
+  // outermost change rather than simply reporting distance from the cut.
+  const firstChange = track.findIndex((item) => item.role !== 'arm')
+  let lastChange = -1
+  for (let i = track.length - 1; i >= 0; i--) {
+    if (track[i].role !== 'arm') { lastChange = i; break }
+  }
+  if (firstChange >= 0 && lastChange >= 0) {
+    const leftFlank = firstChange
+    const rightFlank = track.length - lastChange - 1
+    const shortest = Math.min(leftFlank, rightFlank)
+    if (shortest < 30) {
+      warnings.push(`Short uninterrupted homology: ${leftFlank} nt left / ${rightFlank} nt right. Fewer than 30 nt on either side may reduce repair efficiency; aim for at least 40 nt when possible.`)
+    } else if (shortest < 40) {
+      warnings.push(`Limited uninterrupted homology: ${leftFlank} nt left / ${rightFlank} nt right. Approximately 40 nt on each side is a useful starting point.`)
+    }
+  }
+
+  const changedRefs = [...affected, ...block.subs.map((sub) => sub.refIdx)]
+  const farthestFromCut = changedRefs.length
+    ? Math.max(...changedRefs.map((refIdx) => Math.min(Math.abs(refIdx - cut), Math.abs(refIdx - (cut - 1)))))
+    : 0
+  if (farthestFromCut > 40) {
+    warnings.push(`The outermost repair-template change is ${farthestFromCut} bp from the Cas9 cut. Incorporation often declines beyond approximately 30–40 bp.`)
+  } else if (farthestFromCut > 30) {
+    warnings.push(`The outermost repair-template change is ${farthestFromCut} bp from the Cas9 cut; edits closer than approximately 30 bp are generally favored.`)
+  }
+
   // Deleted bases fuse out: the repair template is the non-ghost track.
   const senseSeq = track.filter((t) => t.role !== 'del').map((t) => t.base).join('')
 

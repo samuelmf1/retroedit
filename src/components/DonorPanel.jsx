@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import ArmSlider from './ArmSlider.jsx'
+import PlasmidModal from './PlasmidModal.jsx'
 
 
 function blockingOptionLabel(option, refStart, recommendedKey) {
@@ -13,10 +14,12 @@ function blockingOptionLabel(option, refStart, recommendedKey) {
 }
 
 export default function DonorPanel({
-  donor, guide, armLeft, armRight, onArmLeft, onArmRight,
+  donor, guide, armLeft, armRight, onArmLeft, onArmRight, onArmRatio,
   armsCustomized, onApplyArmsToAll, orientation, onOrientation, reference,
-  blockingChoice, onBlockingChoice,
+  blockingChoice, onBlockingChoice, scaffold, scaffoldLabel, guideChecked, onAddToLibrary, libraryCount, onExport,
 }) {
+  const [plasmidOpen, setPlasmidOpen] = useState(false)
+  const closePlasmid = useCallback(() => setPlasmidOpen(false), [])
   const [copied, setCopied] = useState(null)
 
   if (!guide) {
@@ -24,6 +27,13 @@ export default function DonorPanel({
       <section className="panel donor">
         <header className="panelhead"><h2>HDR donor</h2></header>
         <p className="empty">Select a guide to design its repair template.</p>
+        <div className="donoractions">
+          <div className="donoractionsleft">
+            <button type="button" className="plasmidopen" disabled>View plasmid map</button>
+            <button type="button" className="libraryadd" disabled>+ Add to library</button>
+          </div>
+          <ExportActions count={libraryCount} onExport={onExport} />
+        </div>
       </section>
     )
   }
@@ -33,6 +43,12 @@ export default function DonorPanel({
     setCopied(what)
     setTimeout(() => setCopied(null), 1200)
   }
+
+  const armTotal = armLeft + armRight
+  const pamSideArm = guide.strand === '+' ? armRight : armLeft
+  const armRatio = Math.abs(armLeft - armRight) <= 1
+    ? '50:50'
+    : Math.abs(pamSideArm / armTotal - 0.28) <= 0.015 ? '72:28' : null
 
 
   return (
@@ -46,10 +62,31 @@ export default function DonorPanel({
       </header>
 
       <div className="donorctl">
-        <label className="field grow">
+        <div className="field grow">
           <span>Homology arms (this guide)</span>
           <ArmSlider left={armLeft} right={armRight} onLeft={onArmLeft} onRight={onArmRight} />
-        </label>
+          <div className="armratio" role="group" aria-label="Homology arm design">
+            <span>Homology design</span>
+            <button type="button" className={armRatio === '50:50' ? 'active' : ''}
+              aria-pressed={armRatio === '50:50'} onClick={() => onArmRatio('50:50')}>
+              Symmetric <b>50:50</b>
+            </button>
+            <span className="armratiooption">
+              <button type="button" className={armRatio === '72:28' ? 'active' : ''}
+                aria-pressed={armRatio === '72:28'}
+                onClick={() => onArmRatio('72:28')}>
+                Asymmetric <b>72:28</b>
+              </button>
+              <span className="armratiotip" role="tooltip">
+                Approximates the published 91 nt / 36 nt asymmetric design while preserving the current total length.
+                <a href="https://www.nature.com/articles/nbt.3481" target="_blank" rel="noreferrer">
+                  Richardson et al., 2016 ↗
+                </a>
+              </span>
+            </span>
+            <small>shorter arm on PAM side</small>
+          </div>
+        </div>
         <label className="field">
           <span>Repair template strand</span>
           <select value={orientation} onChange={(e) => onOrientation(e.target.value)}>
@@ -94,7 +131,7 @@ export default function DonorPanel({
             {donor.blocking.options?.length > 0 && (
               <div className="blockselector">
                 <label>
-                  <span>Alternative PAM/seed disrupting mutations not selected</span>
+                  <span>Alternative PAM/seed disrupting mutations</span>
                   <select
                     value={donor.blocking.manual ? blockingChoice : ''}
                     onChange={(event) => onBlockingChoice(event.target.value || null)}
@@ -114,7 +151,7 @@ export default function DonorPanel({
             )}
             {donor.blocking.alternatives?.length > 0 && (
               <div className="blockalternatives">
-                <strong>Alternative PAM/seed disrupting mutations not selected:</strong>
+                <strong>Alternative PAM/seed disrupting mutations:</strong>
                 {donor.blocking.alternatives.map((candidate) => (
                   <span key={`${candidate.kind}-${candidate.refIdx}`}>
                     g.{reference.start + candidate.refIdx} · {candidate.label}: {candidate.reason}
@@ -141,7 +178,40 @@ export default function DonorPanel({
             onCopy={() => copy(guide.spacer, 'spacer')} copied={copied === 'spacer'} />
         </>
       )}
+      <div className="donoractions">
+        <div className="donoractionsleft">
+          <button type="button" className="plasmidopen" disabled={!donor?.ok}
+            onClick={() => setPlasmidOpen(true)}>View plasmid map</button>
+          <button type="button" className={`libraryadd${guideChecked ? ' added' : ''}`}
+            disabled={!guide.metricsReady || guideChecked}
+            title={!guide.metricsReady ? 'Available after guide scoring and off-target metrics finish' : undefined}
+            onClick={onAddToLibrary}>
+            {guideChecked ? '✓ Added to library' : '+ Add to library'}
+          </button>
+          {!guide.metricsReady && <span className="librarynote">Available when guide metrics finish</span>}
+        </div>
+        <ExportActions count={libraryCount} onExport={onExport} />
+      </div>
+      <PlasmidModal
+        open={plasmidOpen}
+        onClose={closePlasmid}
+        spacer={guide.spacer}
+        scaffold={scaffold}
+        scaffoldLabel={scaffoldLabel}
+        repairTemplate={donor?.ssodn ?? ''}
+      />
     </section>
+
+  )
+}
+
+function ExportActions({ count, onExport }) {
+  return (
+    <div className="donorexports">
+      <span>{count} in library</span>
+      <button type="button" disabled={!count} onClick={() => onExport('fasta')}>FASTA</button>
+      <button type="button" disabled={!count} onClick={() => onExport('tsv')}>TSV</button>
+    </div>
   )
 }
 

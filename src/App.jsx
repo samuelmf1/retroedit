@@ -36,6 +36,7 @@ import { biotypesPresent, buildFeatureItems } from './lib/features.js'
 import { CODON_TABLE, buildCodonTrack, codonAt } from './lib/codon.js'
 import { complementBase } from './lib/bio.js'
 import { cachedOffTargets, fetchCanonicalExons, fetchNearbyFeatures, fetchOffTargets, fetchVariants, genomicsStatus } from './lib/genomics.js'
+import { clinvarCategory } from './lib/variants.js'
 
 const DEFAULT_VIEW_OPTS = {
   featureLevels: { gene: true, transcript: false },
@@ -43,6 +44,7 @@ const DEFAULT_VIEW_OPTS = {
   codons: true,
   gnomad: false,
   gnomadMaf: DEFAULT_GNOMAD_MAF,
+  clinvarSignificances: null, // null = all ClinVar significance categories
   clinvar: false,
 }
 const MAF_WARN = 0.01 // polymorphism threshold that can impair a guide
@@ -347,6 +349,14 @@ export default function App() {
       current?.transcript?.id === nav.transcript.id ? { ...current, index: nearest } : current
     ))
   }, [region, loading, exonNav, doLoad])
+
+  const navigateToOverviewGene = useCallback(async (gene) => {
+    if (!gene || loading) return
+    const geneQuery = gene.name || gene.id
+    if (!geneQuery) return
+    setQuery(geneQuery)
+    await doLoad({ query: geneQuery })
+  }, [doLoad, loading])
 
   const resizeOverview = useCallback(async (requestedStart, requestedEnd) => {
     if (!region || loading || !Number.isFinite(requestedStart) || !Number.isFinite(requestedEnd)) return
@@ -795,8 +805,11 @@ export default function App() {
 
   const displayedVariantItems = useMemo(() => variantItems.filter((v) => (
     (v.source === 'gnomad' && viewOpts.gnomad && (v.af ?? 0) >= (viewOpts.gnomadMaf ?? DEFAULT_GNOMAD_MAF)) ||
-    (v.source === 'clinvar' && viewOpts.clinvar)
-  )), [variantItems, viewOpts.gnomad, viewOpts.gnomadMaf, viewOpts.clinvar])
+    (v.source === 'clinvar' && viewOpts.clinvar &&
+      (viewOpts.clinvarSignificances == null || viewOpts.clinvarSignificances.has(clinvarCategory(v.clnsig))))
+  )), [
+    variantItems, viewOpts.gnomad, viewOpts.gnomadMaf, viewOpts.clinvar, viewOpts.clinvarSignificances,
+  ])
 
   // Common variants (alternate allele frequency >= 1%) can impair guide binding.
   const guideVariantWarn = useMemo(() => {
@@ -929,6 +942,28 @@ export default function App() {
       return { ...m, [selectedGuide.id]: { ...cur, [side]: value } }
     })
   }, [selectedGuide, inheritedArmsFor])
+  const setSelectedArmRatio = useCallback((ratio) => {
+    if (!selectedGuide) return
+    let total = selectedArms.left + selectedArms.right
+    let left
+    let right
+    if (ratio === '72:28') {
+      // Richardson et al. used 91/36-nt asymmetric arms (~72:28). Preserve the
+      // current total while keeping both arms within the slider's 10–200-bp bounds.
+      total = Math.max(36, Math.min(277, total))
+      const longArm = Math.round(total * 0.72)
+      const shortArm = total - longArm
+      // Forward PAMs are to the genomic right; reverse-strand PAMs are to the left.
+      ;({ left, right } = selectedGuide.strand === '+'
+        ? { left: longArm, right: shortArm }
+        : { left: shortArm, right: longArm })
+    } else {
+      left = Math.round(total / 2)
+      right = total - left
+    }
+    setArmMap((current) => ({ ...current, [selectedGuide.id]: { left, right } }))
+  }, [selectedGuide, selectedArms])
+
 
   const applyArmsToAll = useCallback(() => {
     if (!selectedGuide) return
@@ -997,6 +1032,15 @@ export default function App() {
     })
   }, [])
 
+  const addChecked = useCallback((id) => {
+    setChecked((prev) => {
+      if (prev.has(id)) return prev
+      const next = new Set(prev)
+      next.add(id)
+      return next
+    })
+  }, [])
+
   const toggleAll = useCallback((ids) => {
     setChecked((prev) => (ids.every((id) => prev.has(id)) ? new Set() : new Set(ids)))
   }, [])
@@ -1008,6 +1052,7 @@ export default function App() {
     const chosen = guideView.sorted.filter((g) => g.metricsReady && checked.has(g.id))
     if (!chosen.length) return
     const chrom = region.reference.chrom
+    const selectedRs3Column = `rs3_${rs3Model}`
     const rows = chosen.map((g) => {
       const arms = armsFor(g)
       const d = designDonor({
@@ -1039,12 +1084,12 @@ export default function App() {
     let filename
     if (format === 'fasta') {
       text = rows.map((r) =>
-        `>${r.id}|spacer|rs3_hsu2013=${r.rs3_hsu2013}|rs3_chen2013=${r.rs3_chen2013}\n${r.spacer}\n` +
+        `>${r.id}|spacer|${selectedRs3Column}=${r[selectedRs3Column]}\n${r.spacer}\n` +
         (r.repair_template ? `>${r.id}|repair_template_${r.repair_template_strand}\n${r.repair_template}\n` : ''),
       ).join('')
       filename = 'retroedit_guides.fasta'
     } else {
-      const cols = ['id', 'strand', 'spacer', 'pam', 'sgRNA', 'sgRNA_scaffold', 'rs3_hsu2013', 'rs3_chen2013', 'gc',
+      const cols = ['id', 'strand', 'spacer', 'pam', 'sgRNA', 'sgRNA_scaffold', selectedRs3Column, 'gc',
         'cut_genomic', 'cut_dist', 'context_30mer', 'repair_template', 'repair_template_strand', 're_cut_disruption']
       text = [cols.join('\t'), ...rows.map((r) => cols.map((c) => r[c]).join('\t'))].join('\n') + '\n'
       filename = 'retroedit_guides.tsv'
@@ -1153,6 +1198,27 @@ export default function App() {
       setSelection(null)
     }
   }, [edited, caret, selRange, commit, undo, redo])
+
+  // Left and Right always belong to the sequence cursor once a sequence is
+  // loaded. Text-entry controls and modal dialogs retain native arrow behavior.
+  useEffect(() => {
+    if (!region) return undefined
+    const moveSequenceCursor = (event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      const target = event.target
+      if (target?.isContentEditable || target?.closest?.('input, textarea, select, [role="dialog"]')) return
+
+      event.preventDefault()
+      event.stopPropagation()
+      const delta = event.key === 'ArrowLeft' ? -1 : 1
+      setCaret((current) => Math.max(0, Math.min(edited.length, current + delta)))
+      setSelection(null)
+      viewerRef.current?.focus()
+    }
+    window.addEventListener('keydown', moveSequenceCursor, true)
+    return () => window.removeEventListener('keydown', moveSequenceCursor, true)
+  }, [edited.length, region])
 
   const revert = useCallback(() => {
     if (!region) return
@@ -1264,6 +1330,7 @@ export default function App() {
                 onSelectionChange={setSelection}
                 onSelectGuide={selectGuide}
                 onOverviewNavigate={isCustomRegion ? undefined : navigateOverview}
+                onOverviewGene={isCustomRegion ? undefined : navigateToOverviewGene}
                 onOverviewResize={isCustomRegion ? undefined : resizeOverview}
                 onOverviewExon={isCustomRegion ? undefined : snapToExon}
                 overviewDisabled={loading}
@@ -1289,7 +1356,6 @@ export default function App() {
                 checked={checked}
                 onToggle={toggleChecked}
                 onToggleAll={toggleAll}
-                onExport={exportGuides}
                 offAvailable={offTargets.available}
                 variantWarn={guideVariantWarn}
                 showOffTargets={!isCustomRegion}
@@ -1301,12 +1367,19 @@ export default function App() {
                 armRight={selectedArms.right}
                 onArmLeft={(v) => setSelectedArm('left', v)}
                 onArmRight={(v) => setSelectedArm('right', v)}
+                onArmRatio={setSelectedArmRatio}
                 armsCustomized={armsCustomized}
                 onApplyArmsToAll={applyArmsToAll}
                 orientation={orientation}
                 onOrientation={setOrientation}
                 blockingChoice={selectedBlockingChoice}
                 onBlockingChoice={setSelectedBlockingChoice}
+                scaffold={TRACR_RNAS[rs3Model].scaffold}
+                scaffoldLabel={TRACR_RNAS[rs3Model].label}
+                guideChecked={selectedGuide ? checked.has(selectedGuide.id) : false}
+                onAddToLibrary={() => selectedGuide && addChecked(selectedGuide.id)}
+                libraryCount={guideView.sorted.filter((guide) => guide.metricsReady && checked.has(guide.id)).length}
+                onExport={exportGuides}
                 reference={region.reference}
               />
             </aside>
@@ -1328,7 +1401,7 @@ function GettingStarted() {
       <div className="tutorialstart">
         <span className="tutorialarrow up" aria-hidden="true">↑</span>
         <span className="tutorialnumber">1</span>
-        <div><h2>Input gene or locus</h2><p>Type a symbol or coordinate above, or choose an example chip, then press Load.</p></div>
+        <div><h2>Input gene or locus</h2><p>Type a symbol, rsID, or coordinate above, or choose an example chip, then press Load.</p></div>
       </div>
       <div className="tutorialnavigate">
         <div className="tutorialstep compact">
@@ -1352,10 +1425,6 @@ function GettingStarted() {
             <span className="tutorialarrow down" aria-hidden="true">↓</span>
           </div>
           <div className="mocksequence" aria-hidden="true">
-            <div className="mocktrackrow mockvariantrow">
-              <b>Variants</b>
-              <div className="mockvariants"><span className="gnomad-common">gnomAD ≥1%</span><span className="gnomad-rare">gnomAD rare</span><span className="clinvar-pathogenic">ClinVar pathogenic</span></div>
-            </div>
             <div className="mocktrackrow mockdnarow">
               <b>Sequence</b>
               <div className="mockdnatrack">
@@ -1367,6 +1436,10 @@ function GettingStarted() {
               <span className="mocksub">C→A mutation</span><span className="mockins">+TT insertion</span><span className="mockdel">−GCT deletion</span>
             </div>
             <div className="mocktrackrow mockcodonrow"><b>Codons / AA</b><div className="mockcodons"><span>ACT · T</span><span>GAG · E</span><span>GCT · A</span><span>ACC · T</span></div></div>
+            <div className="mocktrackrow mockvariantrow">
+              <b>Variants</b>
+              <div className="mockvariants"><span className="gnomad-common">gnomAD ≥1%</span><span className="gnomad-rare">gnomAD rare</span><span className="clinvar-pathogenic">ClinVar pathogenic</span></div>
+            </div>
             <div className="mockannotations">
               <div className="mockannotationlane"><b>Gene</b><span className="mockgene">GENE</span></div>
               <div className="mockannotationlane"><b>CDS / UTR</b><span className="mockutr">5′ UTR</span><span className="mockcds">CDS</span></div>
@@ -1393,7 +1466,7 @@ function GettingStarted() {
           <div className="tutorialpanel export">
             <div className="tutorialstep compact">
               <span className="tutorialnumber">6</span>
-              <div><h3>Export designs</h3><p>Check completed designs and export FASTA or TSV.</p></div>
+              <div><h3>Export library of designs</h3><p>Check completed designs and export FASTA or TSV.</p></div>
               <span className="tutorialarrow up-right" aria-hidden="true">↗</span>
             </div>
           </div>

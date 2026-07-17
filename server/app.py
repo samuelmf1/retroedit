@@ -18,11 +18,13 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
+from functools import lru_cache
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from Bio import SeqIO
 from pydantic import BaseModel, Field
 
 logging.basicConfig(
@@ -204,6 +206,46 @@ async def score(req: ScoreRequest) -> ScoreResponse:
         available=_predict_seq is not None,
         detail=_import_error,
     )
+
+
+PLASMID_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "pWB366_U6_MSR_AATD-02-MSD_noPolyT.dna"
+
+
+@lru_cache(maxsize=1)
+def _load_plasmid_template() -> dict:
+    record = SeqIO.read(PLASMID_TEMPLATE_PATH, "snapgene")
+    features = []
+    for index, feature in enumerate(record.features):
+        label = feature.qualifiers.get("label", [feature.type])[0]
+        features.append({
+            "id": f"feature-{index}",
+            "label": label,
+            "type": feature.type,
+            "start": int(feature.location.start),
+            "end": int(feature.location.end),
+            "strand": feature.location.strand or 0,
+        })
+    by_label = {feature["label"]: feature for feature in features}
+    placeholder = by_label["Starting G"]
+    msd = by_label["AATD-02-MSD"]
+    return {
+        "name": PLASMID_TEMPLATE_PATH.stem,
+        "sequence": str(record.seq).upper(),
+        "features": features,
+        "anchors": {
+            "guide_insert_after": placeholder["end"],
+            "repair_insert_after": msd["end"],
+        },
+    }
+
+
+@app.get("/api/plasmid/template")
+async def plasmid_template() -> dict:
+    try:
+        return await asyncio.to_thread(_load_plasmid_template)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("SnapGene template load failed: %s", exc)
+        return JSONResponse(status_code=500, content={"detail": "Plasmid template is unavailable"})
 
 
 # Register the frontend last so the catch-all static mount cannot shadow /api.
