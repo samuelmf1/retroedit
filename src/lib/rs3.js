@@ -4,6 +4,13 @@
 // base only costs a request for the guides that actually changed.
 
 const cache = new Map()
+const CACHE_LIMIT = 5000
+
+function setCached(k, value) {
+  cache.delete(k)
+  cache.set(k, value)
+  while (cache.size > CACHE_LIMIT) cache.delete(cache.keys().next().value)
+}
 const key = (context, tracr) => `${tracr}|${context}`
 
 export function cachedScore(context, tracr) {
@@ -50,7 +57,7 @@ export async function scoreContexts(contexts, tracr, signal, serverCache = true)
   payload.scores.forEach((score, i) => {
     const context = missing[i]
     const value = typeof score === 'number' ? score : null
-    cache.set(key(context, tracr), value)
+    setCached(key(context, tracr), value)
     scores.set(context, value)
   })
 

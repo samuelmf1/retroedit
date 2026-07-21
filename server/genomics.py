@@ -16,6 +16,7 @@ import time
 import re
 import shutil
 import subprocess
+from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -43,6 +44,7 @@ GNOMAD_API_URL = os.environ.get("GNOMAD_API_URL", "https://gnomad.broadinstitute
 GNOMAD_API_TIMEOUT = float(os.environ.get("GNOMAD_API_TIMEOUT", "15"))
 GNOMAD_API_CACHE_TTL = int(os.environ.get("GNOMAD_API_CACHE_TTL", "900"))
 GNOMAD_API_CACHE_SIZE = int(os.environ.get("GNOMAD_API_CACHE_SIZE", "256"))
+OFFTARGET_CACHE_SIZE = int(os.environ.get("OFFTARGET_CACHE_SIZE", "4096"))
 GNOMAD_REMOTE_DATASETS = {
     "GRCh38": "gnomad_r4",
     "GRCh37": "gnomad_r2_1",
@@ -413,6 +415,7 @@ class VariantResponse(BaseModel):
     detail: Optional[str] = None
 
 
+@lru_cache(maxsize=128)
 def _gnomad_variants(chrom: str, start: int, end: int) -> VariantResponse:
     path = _gnomad_path(chrom)
     if not TABIX or not path.exists():
@@ -447,6 +450,7 @@ _CLNSIG_KEYS = ("CLNSIG", "CLNSIGINCL", "CLINSIG")
 _CLNDN_KEYS = ("CLNDN", "CLNDBN", "CLNDISDB")
 
 
+@lru_cache(maxsize=128)
 def _clinvar_variants(assembly: str, chrom: str, start: int, end: int) -> VariantResponse:
     path = CLINVAR_VCF.get(assembly)
     if not path or not TABIX or not path.exists():
@@ -642,8 +646,15 @@ def _local_contig(assembly: str, chrom: str) -> Optional[str]:
     return next((candidate for candidate in candidates if candidate in contigs), None)
 
 
+_REGION_LOCKS = tuple(threading.Lock() for _ in range(32))
+
+
+def _region_lock(kind: str, assembly: str, chrom: str, start: int, end: int) -> threading.Lock:
+    key = (kind, assembly, str(chrom), start, end)
+    return _REGION_LOCKS[hash(key) % len(_REGION_LOCKS)]
+
 @lru_cache(maxsize=512)
-def _local_sequence(assembly: str, chrom: str, start: int, end: int) -> str:
+def _local_sequence_cached(assembly: str, chrom: str, start: int, end: int) -> str:
     contig = _local_contig(assembly, chrom)
     if not contig:
         raise ValueError(f"unknown contig {chrom}")
@@ -655,6 +666,22 @@ def _local_sequence(assembly: str, chrom: str, start: int, end: int) -> str:
         raise RuntimeError(proc.stderr.strip() or f"samtools exited {proc.returncode}")
     return "".join(line.strip() for line in proc.stdout.splitlines() if not line.startswith(">"))
 
+
+def _local_sequence(assembly: str, chrom: str, start: int, end: int) -> str:
+    with _region_lock("sequence", assembly, chrom, start, end):
+        return _local_sequence_cached(assembly, chrom, start, end)
+
+
+
+def warm_genomic_indexes() -> None:
+    """Warm small immutable indexes so the first request is not a cold start."""
+    for assembly in GENE_INDEX:
+        _gene_index(assembly)
+    for assembly in GENOME_FASTA:
+        _faidx_contigs(assembly)
+    for path in GENCODE_GTF.values():
+        if path.exists():
+            _tabix_contigs(str(path))
 
 @router.get("/gene")
 def local_gene(assembly: str, query: str) -> dict:
@@ -692,8 +719,8 @@ def _stable_id(value: str) -> str:
     return value.split(".", 1)[0]
 
 
-@router.get("/annotations")
-def local_annotations(assembly: str, chrom: str, start: int, end: int) -> dict:
+@lru_cache(maxsize=128)
+def _local_annotations_cached(assembly: str, chrom: str, start: int, end: int) -> dict:
     path = GENCODE_GTF.get(assembly)
     if (
         not TABIX or not path or not path.exists()
@@ -761,6 +788,12 @@ def local_annotations(assembly: str, chrom: str, start: int, end: int) -> dict:
         "coding": coding,
     }
 
+
+
+@router.get("/annotations")
+def local_annotations(assembly: str, chrom: str, start: int, end: int) -> dict:
+    with _region_lock("annotations", assembly, chrom, start, end):
+        return _local_annotations_cached(assembly, chrom, start, end)
 
 @router.get("/gene-exons")
 @lru_cache(maxsize=512)
@@ -869,6 +902,53 @@ class OffTargetResponse(BaseModel):
     detail: Optional[str] = None
 
 
+_offtarget_cache: OrderedDict[tuple, dict] = OrderedDict()
+_offtarget_cache_lock = threading.Lock()
+
+
+def _offtarget_cache_key(assembly: str, pam: str, guide: dict) -> tuple:
+    return (
+        assembly,
+        pam.upper(),
+        str(guide.get("spacer", "")).upper(),
+        str(guide.get("chrom", "")).removeprefix("chr"),
+        guide.get("cutGenomic"),
+    )
+
+
+def _cached_offtargets(
+    assembly: str, pam: str, guides: List[dict],
+) -> tuple[Dict[str, GuideOffTargets], List[dict]]:
+    cached: Dict[str, GuideOffTargets] = {}
+    missing: List[dict] = []
+    with _offtarget_cache_lock:
+        for guide in guides:
+            key = _offtarget_cache_key(assembly, pam, guide)
+            value = _offtarget_cache.get(key)
+            if value is None:
+                missing.append(guide)
+                continue
+            _offtarget_cache.move_to_end(key)
+            guide_id = str(guide.get("id", ""))
+            cached[guide_id] = GuideOffTargets(id=guide_id, **value)
+    return cached, missing
+
+
+def _store_offtarget(
+    assembly: str, pam: str, guide: dict, result: GuideOffTargets,
+) -> None:
+    key = _offtarget_cache_key(assembly, pam, guide)
+    with _offtarget_cache_lock:
+        _offtarget_cache[key] = {
+            "counts": result.counts,
+            "unique": result.unique,
+            "top": result.top,
+        }
+        _offtarget_cache.move_to_end(key)
+        while len(_offtarget_cache) > max(1, OFFTARGET_CACHE_SIZE):
+            _offtarget_cache.popitem(last=False)
+
+
 def _pam_ok(seq3: str, pam: str) -> bool:
     seq3 = seq3.upper()
     if len(seq3) < len(pam):
@@ -906,12 +986,19 @@ def offtargets(req: OffTargetRequest) -> OffTargetResponse:
             detail="off-target index not built; run scripts/build_offtarget_index.sh",
         )
 
+    cached, guides = _cached_offtargets(assembly, req.pam, req.guides)
+    if not guides:
+        return OffTargetResponse(
+            available=True,
+            guides=[cached[str(g.get("id", ""))] for g in req.guides],
+        )
+
     index_prefix = str(_bowtie_index_prefix(assembly))
     faidx = _faidx_fasta(assembly)
 
     # One bowtie run over all spacers. Reads are the 20 nt protospacers.
     reads = "".join(
-        f">{i}\n{g['spacer']}\n" for i, g in enumerate(req.guides) if len(g.get("spacer", "")) == 20
+        f">{i}\n{g['spacer']}\n" for i, g in enumerate(guides) if len(g.get("spacer", "")) == 20
     )
     if not reads:
         return OffTargetResponse(available=True, guides=[])
@@ -959,8 +1046,8 @@ def offtargets(req: OffTargetRequest) -> OffTargetResponse:
 
     pam_seq = _faidx_batch(faidx, regions)
 
-    results = []
-    for i, g in enumerate(req.guides):
+    computed: Dict[str, GuideOffTargets] = {}
+    for i, g in enumerate(guides):
         guide_hits = hits.get(i, [])
         counts = {str(k): 0 for k in range(MAX_MM + 1)}
         top = []
@@ -978,11 +1065,21 @@ def offtargets(req: OffTargetRequest) -> OffTargetResponse:
                 top.append({"chrom": chrom, "pos": h["pos"],
                             "strand": "-" if h["rev"] else "+", "mm": h["mm"], "pam": pam})
         top.sort(key=lambda t: t["mm"])
-        unique = counts.get("0", 0) <= 1 and all(counts.get(str(k), 0) == 0 for k in range(1, MAX_MM + 1))
-        results.append(GuideOffTargets(
-            id=g.get("id", str(i)), counts=counts, unique=unique, top=top,
-        ))
-    return OffTargetResponse(available=True, guides=results)
+        unique = counts.get("0", 0) <= 1 and all(
+            counts.get(str(k), 0) == 0 for k in range(1, MAX_MM + 1)
+        )
+        result = GuideOffTargets(
+            id=str(g.get("id", i)), counts=counts, unique=unique, top=top,
+        )
+        computed[result.id] = result
+        _store_offtarget(assembly, req.pam, g, result)
+    return OffTargetResponse(
+        available=True,
+        guides=[
+            computed.get(str(g.get("id", ""))) or cached[str(g.get("id", ""))]
+            for g in req.guides
+        ],
+    )
 
 
 def _same_locus(chrom: str, pos: int, guide: dict) -> bool:

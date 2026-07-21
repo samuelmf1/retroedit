@@ -30,7 +30,7 @@ import {
 } from './lib/editModel.js'
 import { DEFAULT_ARM_LEN, designDonor, planGuideBlock } from './lib/hdr.js'
 import { rs3Fill, rs3NeedsLightText } from './lib/color.js'
-import { DEFAULT_GENOME_ID, loadRegion, loadRegionAnnotations, registerGenome } from './lib/genome.js'
+import { DEFAULT_GENOME_ID, getGenome, loadRegion, loadRegionAnnotations, registerGenome, resolveLocus } from './lib/genome.js'
 import { cachedScore, checkRs3Health, scoreContexts } from './lib/rs3.js'
 import { biotypesPresent, buildFeatureItems } from './lib/features.js'
 import { CODON_TABLE, buildCodonTrack, codonAt } from './lib/codon.js'
@@ -145,6 +145,7 @@ export default function App() {
     setError(null)
     try {
       let result
+      let nextExonNav = null
       if (gid === CUSTOM_GENOME_ID) {
         if (!custom?.seq) throw new Error('Upload a FASTA or plain-DNA file first.')
         const center = Math.max(1, Math.ceil(custom.seq.length / 2))
@@ -156,44 +157,52 @@ export default function App() {
           },
         })
       } else {
-        result = await loadRegion({
-          query: q,
-          genomeId: gid,
-          windowBp: POSITION_VIEW_BP,
-          locus: opts.locus ?? null,
-        })
-      }
-      let nextExonNav = null
+        const genome = getGenome(gid)
+        let locus = opts.locus ?? await resolveLocus(q, genome, POSITION_VIEW_BP)
+        if (opts.geneContext) locus = { ...locus, gene: opts.geneContext }
 
-      if (opts.geneContext) result.reference.gene = opts.geneContext
-      if (gid !== CUSTOM_GENOME_ID && result.reference.gene && !opts.preserveExonNav && !opts.locus) {
-        const data = await fetchCanonicalExons({
-          assembly: result.reference.assembly,
-          gene: result.reference.gene.id,
-        })
-        if (data?.exons?.length) {
-          let index = data.exons.findIndex((exon) => exon.rank === 1)
-          if (index < 0) index = data.transcript.strand === -1 ? data.exons.length - 1 : 0
-          const exon = data.exons[index]
-          const geneContext = { ...data.gene, canonical: data.transcript.id }
-          result = await loadRegion({
-            genomeId: gid,
-            locus: {
+        // Resolve the canonical first exon before requesting sequence. Previously
+        // gene loads fetched the initial TSS window, discarded it, then fetched
+        // the exon window, adding a full redundant request to every search.
+        if (locus.gene && !opts.preserveExonNav && !opts.locus) {
+          const data = await fetchCanonicalExons({
+            assembly: genome.assembly,
+            gene: locus.gene.id,
+          })
+          if (data?.exons?.length) {
+            let index = data.exons.findIndex((exon) => exon.rank === 1)
+            if (index < 0) index = data.transcript.strand === -1 ? data.exons.length - 1 : 0
+            const exon = data.exons[index]
+            const geneContext = { ...data.gene, canonical: data.transcript.id }
+            locus = {
               chrom: data.chrom,
               start: Math.max(1, exon.start - EXON_CONTEXT_BP),
               end: exon.end + EXON_CONTEXT_BP,
               focus: { start: exon.start, end: exon.end },
               gene: geneContext,
               label: `${data.gene.name} (${data.gene.id})`,
-            },
-          })
-          nextExonNav = { ...data, index }
+            }
+            nextExonNav = { ...data, index }
+          }
         }
-      }
 
-      if (gid !== CUSTOM_GENOME_ID) {
-        const annotations = await loadRegionAnnotations(result).catch(() => null)
-        if (annotations) result = { ...result, ...annotations }
+        // Sequence and local GENCODE annotations are independent reads. Fetch
+        // them together so the load time is the slower request, not their sum.
+        const annotationSeed = {
+          reference: {
+            genomeId: gid,
+            assembly: genome.assembly,
+            chrom: locus.chrom,
+            start: locus.start,
+            end: locus.end,
+            gene: locus.gene,
+          },
+        }
+        const [loaded, annotations] = await Promise.all([
+          loadRegion({ genomeId: gid, locus }),
+          loadRegionAnnotations(annotationSeed).catch(() => null),
+        ])
+        result = annotations ? { ...loaded, ...annotations } : loaded
       }
 
       if (!opts.preserveLoadState) {
@@ -1276,6 +1285,7 @@ export default function App() {
               frameAvailable={!!frame}
               overviewTargetRef={setOverviewTarget}
               locusOverview={locusOverview}
+              shownBp={region.reference.seq.length}
               exonNav={exonNav}
               navigationDisabled={loading}
               onSnapExon={() => snapToExon(exonNav?.index)}

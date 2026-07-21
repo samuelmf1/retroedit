@@ -117,6 +117,21 @@ The application includes several limits for this 4 GB host:
 - Off-target searches accept at most 100 guides and expensive request bodies are
   limited to 256 KiB.
 - The browser waits one second after edits settle before starting Bowtie.
+- Waiting RuleSet3 requests queue asynchronously instead of consuming the shared
+  request thread pool.
+- Reference sequences, GENCODE annotations, local variants, RuleSet3 scores, and
+  completed Bowtie guide results use bounded in-memory caches shared by users.
+- Simultaneous cold requests for the same sequence or annotation interval collapse
+  into one indexed read.
+- The browser deduplicates repeated immutable requests; fingerprinted production
+  assets are gzip-compressed and cached as immutable for one year.
+
+Cache limits can be tuned in the systemd unit without changing code:
+
+```ini
+Environment=RS3_CACHE_SIZE=20000
+Environment=OFFTARGET_CACHE_SIZE=4096
+```
 
 Keep Uvicorn at `--workers 1`; multiple workers could each launch a memory-heavy
 Bowtie process and duplicate the RuleSet3 model.

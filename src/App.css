@@ -914,3 +914,138 @@
 .plasmiddetail i { width: 10px; height: 10px; border-radius: 3px; }
 @media (max-width: 1050px) { .cargokeys { display: none; } .plasmidmaptoolbar > span { margin-left: auto; } }
 @media (max-width: 700px) { .plasmidmaptoolbar { align-items: flex-start; flex-direction: column; gap: 6px; } .plasmidmaptoolbar > span { margin-left: 0; } .mapmodes { width: 100%; } .mapmodes button { flex: 1; } }
+
+/* ---- site-wide contrast pass ---- */
+.controls {
+  background: #f8fbff;
+  border-bottom-color: var(--line-strong);
+  box-shadow: 0 2px 8px rgba(20, 34, 51, 0.07);
+}
+.controlbrand { color: #2864df; }
+.examplechip, .customupload { background: #edf3f9; }
+.locusbar { background: #eef3f8; border-bottom-color: var(--line-strong); }
+.overviewslot {
+  border-color: #b9c7d6; background: #f4f8fc;
+  box-shadow: inset 0 1px 0 #fff, 0 2px 6px rgba(20, 34, 51, 0.10);
+}
+.frchip { background: #f8fbff; }
+.frchip.on { background: #dce8ff; }
+.editbar { background: #f7faff; border-bottom-color: var(--line-strong); }
+.kbd { background: #edf3f8; }
+.gettingstarted { background: linear-gradient(180deg, #eef3fa 0%, #e5ecf4 100%); }
+.tutorialnavigate, .tutorialmock {
+  background: #fff; border-color: #aebdcc; box-shadow: 0 10px 30px rgba(35, 64, 109, 0.12);
+}
+.mocksequence { background: #eef3f8; border-color: #bdcad7; }
+.tutorialpanel { background: #f8fafc; border-color: #c1cddd; }
+.workspace { background: #e9eef5; }
+.editorpane { background: #fff; }
+.viewer { background: #fff; }
+.sidebar {
+  background: #edf2f7;
+  border-left-color: #aebdcc;
+  box-shadow: inset 5px 0 10px rgba(20, 34, 51, 0.015);
+}
+.resizer { border-left-color: #aebdcc; }
+.selectionbar, .genomebar { background: rgba(237, 243, 248, 0.97); }
+.panel {
+  border-color: #b8c5d3;
+  box-shadow: 0 3px 10px rgba(20, 34, 51, 0.08);
+}
+.panelhead {
+  background: #edf3f8;
+  border-bottom-color: #b8c5d3;
+}
+.rs3legend { background: #f7f9fc; border-bottom-color: #c5d0dc; }
+.guides th {
+  background: #e9eff5;
+  color: #405267;
+  border-bottom-color: #aebdcc;
+  box-shadow: 0 1px 0 #aebdcc;
+}
+.guides td { border-bottom-color: #d5dee7; }
+.guides tbody tr:nth-child(even):not(.selected):not(.common-variant) { background: #f6f8fb; }
+.guides tbody tr:hover:not(.selected) { background: #eaf2fc; }
+.guides tbody tr.selected { background: #d8e6ff; }
+.guides tbody tr.metrics-pending { background: #eef2f6; }
+.guides tbody tr.metrics-pending:nth-child(even) { background: #e9eef3; }
+.guides tbody tr.metrics-pending:hover { background: #e4ebf2; }
+.guides tbody tr.metrics-pending.selected { background: #d8e6ff; }
+.guides tbody tr.common-variant:not(.selected) { background: #fff0ed; }
+.guides tbody tr.common-variant:not(.selected):hover { background: #ffe5e1; }
+.donorctl { background: #f8fafc; }
+.donorstats { background: #bfcbd7; border-top-color: #b8c5d3; }
+.stat { background: #f3f6f9; }
+.stat:nth-child(even) { background: #eaf0f5; }
+.proof, .donortrack { background: #f7f9fc; }
+.seqbox code.wrap { background: #eef3f8; border-color: #bcc9d6; }
+.donoractions { background: #eaf0f5; border-top-color: #b8c5d3; }
+.plasmidmodal { background: #e7edf4; }
+.plasmidmodalhead, .plasmidlegend, .sequencelegend { border-color: #b8c5d3; }
+.plasmidmap.circular, .plasmidmap.linear { border-color: #b8c5d3; }
+
+/* Locus metadata sits with navigation; strand belongs to the overview track. */
+.featureribbon,
+.featureribbon.noexon {
+  grid-template-columns: max-content minmax(220px, 1fr);
+  grid-template-rows: auto;
+  column-gap: 14px;
+}
+.locuscluster {
+  grid-column: 1; grid-row: 1; min-width: 0;
+  display: grid; grid-template-rows: auto auto; row-gap: 3px;
+  align-self: center;
+}
+.locusprimary { min-width: 0; display: flex; align-items: center; gap: 10px; }
+.locusidentity {
+  grid-column: auto; grid-row: auto; flex: none;
+  align-items: flex-start; max-width: 220px;
+}
+.locusidentity strong { max-width: 220px; }
+.exonnav { grid-column: auto; grid-row: auto; flex: none; }
+.locusrange {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted); font-size: 9.5px; line-height: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.locusrange strong { color: #46586a; font-weight: 600; }
+.overviewslot,
+.featureribbon.noexon .overviewslot {
+  grid-column: 2; grid-row: 1; width: 100%;
+}
+.genomebar.top {
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: minmax(18px, 1fr);
+  column-gap: 7px;
+  align-items: center;
+}
+.genomebar.top .genomebar-track {
+  grid-column: 2; grid-row: 1; align-self: center; width: 100%;
+}
+.genomebar.top .overviewstrand {
+  grid-column: 1; grid-row: 1; justify-self: start; align-self: center;
+  margin: 0; font-size: 8.5px; line-height: 12px; white-space: nowrap;
+}
+@media (max-width: 850px) {
+  .featureribbon,
+  .featureribbon.noexon { grid-template-columns: minmax(0, 1fr); row-gap: 7px; }
+  .locuscluster { grid-column: 1; }
+  .locusprimary { flex-wrap: wrap; }
+  .overviewslot,
+  .featureribbon.noexon .overviewslot { grid-column: 1; grid-row: 2; width: 100%; }
+}
+
+/* Taller interactive gene overview diagram and selection window. */
+.overviewslot { min-height: 47px; }
+.genomebar-gene { top: 14px; height: 3px; }
+.genomebar-gene::after { top: -7px; font-size: 18px; line-height: 18px; }
+.genomebar-exon { top: 8px; height: 14px; border-radius: 3px; }
+.genomebar-element { height: 14px; border-radius: 4px; }
+.genomebar-element-label { font-size: 8px; line-height: 12px; padding: 0 4px; }
+.genomebar-window {
+  top: 1px;
+  height: calc(var(--overview-track-height, 30px) - 2px);
+  border-width: 2px;
+  border-radius: 5px;
+}
+.genomebar-resize { top: -2px; bottom: -2px; width: 8px; }

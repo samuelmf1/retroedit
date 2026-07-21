@@ -2,25 +2,45 @@
 // Everything degrades gracefully: if the backend or its reference files are
 // absent, calls resolve to an unavailable/empty result and the UI hides them.
 
-export async function genomicsStatus() {
-  try {
-    const res = await fetch('/api/genomics/status')
-    if (!res.ok) throw new Error(String(res.status))
-    return await res.json()
-  } catch {
-    return { tabix: false, bowtie: false, gnomad: { available: false }, clinvar: { available: {} }, offtarget: { assemblies: {} } }
-  }
+const CLIENT_CACHE_LIMIT = 512
+const canonicalExonRequests = new Map()
+const variantCache = new Map()
+let statusRequest = null
+
+function setBounded(cache, key, value) {
+  cache.delete(key)
+  cache.set(key, value)
+  while (cache.size > CLIENT_CACHE_LIMIT) cache.delete(cache.keys().next().value)
 }
 
-export async function fetchCanonicalExons({ assembly, gene }) {
-  try {
-    const params = new URLSearchParams({ assembly, query: gene })
-    const res = await fetch(`/api/genomics/gene-exons?${params}`)
-    if (!res.ok) throw new Error(String(res.status))
-    return await res.json()
-  } catch {
-    return null
+export function genomicsStatus() {
+  if (!statusRequest) {
+    statusRequest = fetch('/api/genomics/status')
+      .then((res) => {
+        if (!res.ok) throw new Error(String(res.status))
+        return res.json()
+      })
+      .catch(() => ({
+        tabix: false, bowtie: false, gnomad: { available: false },
+        clinvar: { available: {} }, offtarget: { assemblies: {} },
+      }))
   }
+  return statusRequest
+}
+
+export function fetchCanonicalExons({ assembly, gene }) {
+  const key = `${assembly}|${gene}`
+  if (!canonicalExonRequests.has(key)) {
+    const params = new URLSearchParams({ assembly, query: gene })
+    const request = fetch(`/api/genomics/gene-exons?${params}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(String(res.status))
+        return res.json()
+      })
+      .catch(() => null)
+    setBounded(canonicalExonRequests, key, request)
+  }
+  return canonicalExonRequests.get(key)
 }
 
 
@@ -77,11 +97,19 @@ export async function fetchNearbyFeatures({ assembly, chrom, start, end }, signa
 }
 
 export async function fetchVariants({ source, assembly, chrom, start, end }, signal) {
+  const key = `${source}|${assembly}|${chrom}|${start}|${end}`
+  if (variantCache.has(key)) {
+    const payload = variantCache.get(key)
+    setBounded(variantCache, key, payload)
+    return payload
+  }
   try {
     const params = new URLSearchParams({ source, assembly, chrom: String(chrom), start: String(start), end: String(end) })
     const res = await fetch(`/api/genomics/variants?${params}`, { signal })
     if (!res.ok) throw new Error(String(res.status))
-    return await res.json()
+    const payload = await res.json()
+    if (payload.available) setBounded(variantCache, key, payload)
+    return payload
   } catch (err) {
     if (err.name === 'AbortError') throw err
     return { available: false, variants: [] }
@@ -160,7 +188,7 @@ export async function fetchOffTargets({ assembly, pam, guides }, signal) {
           if (!guide) continue
           const stored = { ...result }
           delete stored.id
-          offTargetCache.set(offTargetCacheKey(assembly, pam, guide), stored)
+          setBounded(offTargetCache, offTargetCacheKey(assembly, pam, guide), stored)
           cached.byGuide[guide.id] = { ...stored, id: guide.id }
         }
       }

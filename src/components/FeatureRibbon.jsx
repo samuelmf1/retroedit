@@ -20,6 +20,10 @@ function mafIndexFor(value) {
     Math.abs(Math.log10(GNOMAD_MAF_STEPS[best].value) - Math.log10(value)) ? index : best
   ), 0)
 }
+function formatChrom(chrom) {
+  return `chr${String(chrom).replace(/^chr/i, '')}`
+}
+
 
 function Chip({ active, disabled, title, onClick, children }) {
   return (
@@ -82,7 +86,7 @@ export function AnnotationControls({
 export default function FeatureRibbon({
   opts, onChange, biotypes, status, assembly, frameAvailable,
   exonNav, navigationDisabled, onSnapExon, onPreviousExon, onNextExon,
-  onPanLeft, onPanRight, overviewTargetRef, locusOverview,
+  onPanLeft, onPanRight, overviewTargetRef, locusOverview, shownBp,
 }) {
   const currentExon = exonNav?.exons?.[exonNav.index]
   const exonLabel = currentExon
@@ -112,59 +116,42 @@ export default function FeatureRibbon({
 
   return (
     <div className={`featureribbon${navigationDisabled ? ' loading' : ''}${!currentExon ? ' noexon' : ''}`}>
-      <div className="locusidentity">
-        <strong>{locusOverview?.label}</strong>
-        {locusOverview?.strand && (
-          <span className={`genomebar-strand ${locusOverview.strand === -1 ? 'rev' : 'fwd'}`}>
-            {locusOverview.strand === -1 ? '← − strand' : '+ strand →'}
-          </span>
+      <div className="locuscluster">
+        <div className="locusprimary">
+          <div className="locusidentity">
+            <strong>{locusOverview?.label}</strong>
+          </div>
+          {currentExon && (
+            <div className="exonnav" title={`${exonNav.gene.name} · canonical ${exonNav.transcript.name}`}>
+              <button type="button" className="frchip exonarrow exonpan"
+                disabled={navigationDisabled} title="Move left by one window (Q)"
+                aria-label="Move left by one window" onClick={onPanLeft}>←</button>
+              <button type="button" className="frchip exonarrow exonjump"
+                disabled={navigationDisabled || exonNav.index <= 0}
+                title="Jump to previous canonical exon (W)" aria-label="Jump to previous canonical exon"
+                onClick={onPreviousExon}>⇤</button>
+              <button type="button" className="frchip exoncurrent" disabled={navigationDisabled}
+                title={`Snap to ${exonLabel} of canonical transcript ${exonNav.transcript.name}`}
+                onClick={onSnapExon}>{exonLabel}</button>
+              <button type="button" className="frchip exonarrow exonjump"
+                disabled={navigationDisabled || exonNav.index >= exonNav.exons.length - 1}
+                title="Jump to next canonical exon (S)" aria-label="Jump to next canonical exon"
+                onClick={onNextExon}>⇥</button>
+              <button type="button" className="frchip exonarrow exonpan"
+                disabled={navigationDisabled} title="Move right by one window (D)"
+                aria-label="Move right by one window" onClick={onPanRight}>→</button>
+            </div>
+          )}
+        </div>
+        {locusOverview && (
+          <div className="locusrange">
+            <strong>{Number(shownBp || 0).toLocaleString()} bp shown</strong>
+            <span aria-hidden="true"> · </span>
+            {formatChrom(locusOverview.chrom)}:{locusOverview.start.toLocaleString()}–{locusOverview.end.toLocaleString()}
+          </div>
         )}
       </div>
-      {currentExon && (
-        <div className="exonnav" title={`${exonNav.gene.name} · canonical ${exonNav.transcript.name}`}>
-          <button
-            type="button"
-            className="frchip exonarrow exonpan"
-            disabled={navigationDisabled}
-            title="Move left by one window (Q)"
-            aria-label="Move left by one window"
-            onClick={onPanLeft}
-          >←</button>
-          <button
-            type="button"
-            className="frchip exonarrow exonjump"
-            disabled={navigationDisabled || exonNav.index <= 0}
-            title="Jump to previous canonical exon (W)"
-            aria-label="Jump to previous canonical exon"
-            onClick={onPreviousExon}
-          >⇤</button>
-          <button
-            type="button"
-            className="frchip exoncurrent"
-            disabled={navigationDisabled}
-            title={`Snap to ${exonLabel} of canonical transcript ${exonNav.transcript.name}`}
-            onClick={onSnapExon}
-          >{exonLabel}</button>
-          <button
-            type="button"
-            className="frchip exonarrow exonjump"
-            disabled={navigationDisabled || exonNav.index >= exonNav.exons.length - 1}
-            title="Jump to next canonical exon (S)"
-            aria-label="Jump to next canonical exon"
-            onClick={onNextExon}
-          >⇥</button>
-          <button
-            type="button"
-            className="frchip exonarrow exonpan"
-            disabled={navigationDisabled}
-            title="Move right by one window (D)"
-            aria-label="Move right by one window"
-            onClick={onPanRight}
-          >→</button>
-        </div>
-      )}
       <div className="overviewslot" ref={overviewTargetRef} />
-
     </div>
   )
 }

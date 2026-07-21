@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
@@ -22,6 +24,7 @@ from functools import lru_cache
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from Bio import SeqIO
@@ -38,16 +41,21 @@ CONTEXT_LENGTH = 30
 TRACRS = ("Chen2013", "Hsu2013")
 MAX_API_BODY_BYTES = 256 * 1024
 MAX_CONTEXTS = 2000
+MAX_SCORE_CACHE = int(os.environ.get("RS3_CACHE_SIZE", "20000"))
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # Load the model off the request path so the first score is not slow.
-    await asyncio.to_thread(_load)
+    await asyncio.gather(
+        asyncio.to_thread(_load),
+        asyncio.to_thread(warm_genomic_indexes),
+    )
     yield
 
 
 app = FastAPI(title="RetroEdit backend", lifespan=lifespan)
 _offtarget_gate = asyncio.Lock()
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 # The dev server proxies /api, but allow direct access too.
 app.add_middleware(
@@ -83,20 +91,29 @@ async def limit_expensive_request_bodies(request: Request, call_next):
             )
         async with _offtarget_gate:
             return await call_next(request)
-    return await call_next(request)
+
+    response = await call_next(request)
+    # Vite fingerprints production assets, so they can be cached permanently.
+    # The HTML shell remains revalidated so deployments appear immediately.
+    if request.method in {"GET", "HEAD"} and request.url.path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    elif request.method in {"GET", "HEAD"} and request.url.path in {"/", "/index.html"}:
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 # gnomAD, ClinVar, annotation, and off-target endpoints.
 try:
-    from .genomics import router as genomics_router
+    from .genomics import router as genomics_router, warm_genomic_indexes
 except ImportError:
-    from genomics import router as genomics_router
+    from genomics import router as genomics_router, warm_genomic_indexes
 app.include_router(genomics_router)
 
 _predict_seq = None
 _import_error: Optional[str] = None
-_cache: dict[tuple[str, str], float] = {}
+_cache: OrderedDict[tuple[str, str], float] = OrderedDict()
 _cache_lock = threading.Lock()
 _score_gate = threading.BoundedSemaphore(1)
+_score_async_gate = asyncio.Lock()
 
 
 def _load():
@@ -127,6 +144,9 @@ def _score_uncached_serial(contexts: List[str], tracr: str) -> List[Optional[flo
             with _cache_lock:
                 for ctx, score in zip(missing, scores):
                     _cache[(ctx, tracr)] = float(score)
+                    _cache.move_to_end((ctx, tracr))
+                while len(_cache) > max(1, MAX_SCORE_CACHE):
+                    _cache.popitem(last=False)
         except Exception as exc:  # noqa: BLE001
             logger.error("RuleSet3 scoring failed: %s", exc)
             return [None] * len(contexts)
@@ -200,7 +220,10 @@ async def score(req: ScoreRequest) -> ScoreResponse:
         return ScoreResponse(scores=[], available=True)
 
     scorer = _score_uncached if req.cache else _score_private
-    scores = await asyncio.to_thread(scorer, req.contexts, tracr)
+    # Queue model work on the event loop rather than occupying one worker
+    # thread per waiting user. Normal sequence/annotation requests stay responsive.
+    async with _score_async_gate:
+        scores = await asyncio.to_thread(scorer, req.contexts, tracr)
     return ScoreResponse(
         scores=scores,
         available=_predict_seq is not None,

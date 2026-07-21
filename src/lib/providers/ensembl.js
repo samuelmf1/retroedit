@@ -3,15 +3,41 @@
 import { normalizeChrom, registerProvider } from '../genomes.js'
 
 const ENSEMBL_ID_RE = /^ENS[A-Z]*G\d+/i
+const JSON_CACHE_LIMIT = 256
+const jsonCache = new Map()
+const jsonInflight = new Map()
+
+function cacheJson(url, payload) {
+  jsonCache.delete(url)
+  jsonCache.set(url, payload)
+  while (jsonCache.size > JSON_CACHE_LIMIT) jsonCache.delete(jsonCache.keys().next().value)
+}
 
 async function getJson(url) {
-  const res = await fetch(url, { headers: { Accept: 'application/json' } })
-  if (!res.ok) {
-    let detail = ''
-    try { const payload = await res.json(); detail = payload?.error ?? payload?.detail ?? '' } catch { /* body was not json */ }
-    throw new Error(detail || `Request returned ${res.status} ${res.statusText}`)
+  if (jsonCache.has(url)) {
+    const payload = jsonCache.get(url)
+    cacheJson(url, payload)
+    return payload
   }
-  return res.json()
+  if (jsonInflight.has(url)) return jsonInflight.get(url)
+
+  const request = (async () => {
+    const res = await fetch(url, { headers: { Accept: 'application/json' } })
+    if (!res.ok) {
+      let detail = ''
+      try { const payload = await res.json(); detail = payload?.error ?? payload?.detail ?? '' } catch { /* body was not json */ }
+      throw new Error(detail || `Request returned ${res.status} ${res.statusText}`)
+    }
+    const payload = await res.json()
+    cacheJson(url, payload)
+    return payload
+  })()
+  jsonInflight.set(url, request)
+  try {
+    return await request
+  } finally {
+    jsonInflight.delete(url)
+  }
 }
 
 export const ensemblProvider = registerProvider('ensembl', {

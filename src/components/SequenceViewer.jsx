@@ -845,8 +845,8 @@ const SequenceViewer = forwardRef(function SequenceViewer(
   }
 
   const overviewTrackHeight = overviewGeometry?.elements.length
-    ? Math.max(32, overviewGeometry.laneCount * 14)
-    : 22
+    ? Math.max(40, overviewGeometry.laneCount * 18)
+    : 30
   return (
     <div className={`viewer${selectionSummary ? ' has-selection' : ''}`}>
       <div
@@ -859,7 +859,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
         <div className="canvas" style={{ height: totalH }}>{rows}</div>
       </div>
       {overviewTarget && overviewGeometry && createPortal(
-        <div className="genomebar top" style={{ '--overview-track-height': `${overviewTrackHeight}px`, '--overview-height': `${overviewTrackHeight + 16}px` }}>
+        <div className="genomebar top" style={{ '--overview-track-height': `${overviewTrackHeight}px`, '--overview-height': `${overviewTrackHeight + 8}px` }}>
           <div
             className={`genomebar-track${overviewGeometry.elements.length ? ' nearby' : ''}${overviewDragPercent == null ? '' : ' dragging'}`}
             role="slider"
@@ -881,7 +881,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
                 type="button"
                 key={element.id || index}
                 className="genomebar-element"
-                style={{ ...element.box, top: element.lane * 14 }}
+                style={{ ...element.box, top: element.lane * 18 }}
                 title={`${element.name} · ${element.biotype?.replace(/_/g, ' ') || 'gene'} · click to open gene`}
                 onPointerDown={(event) => event.stopPropagation()}
                 onClick={() => onOverviewGene?.(element)}
@@ -912,11 +912,12 @@ const SequenceViewer = forwardRef(function SequenceViewer(
               </span>
             )}
           </div>
-          <span className="genomebar-range">
-            <strong>{reference.seq.length.toLocaleString()} bp shown</strong>
-            <span aria-hidden="true"> · </span>
-            {formatChrom(locusOverview.chrom)}:{locusOverview.start.toLocaleString()}–{locusOverview.end.toLocaleString()}
-          </span>
+          {locusOverview.strand && (
+            <span className={`genomebar-strand overviewstrand ${locusOverview.strand === -1 ? 'rev' : 'fwd'}`}
+              title={locusOverview.strand === -1 ? '− strand · transcribed right to left' : '+ strand · transcribed left to right'}>
+              {locusOverview.strand === -1 ? '← − strand' : '+ strand →'}
+            </span>
+          )}
         </div>,
         overviewTarget,
       )}

@@ -1,12 +1,12 @@
 :root {
-  --bg: #f4f6f8;
+  --bg: #e9eef5;
   --panel: #ffffff;
-  --ink: #1b2733;
-  --muted: #6b7a8c;
-  --line: #dce3ea;
-  --line-strong: #c4cfda;
+  --ink: #142233;
+  --muted: #536579;
+  --line: #cbd6e2;
+  --line-strong: #a9b9ca;
   --accent: #2f6fed;
-  --accent-weak: #e8f0ff;
+  --accent-weak: #dce8ff;
 
   --fwd: #3f7f6f;   /* forward strand / + guide */
   --rev: #b5652a;   /* reverse strand / - guide */
@@ -40,8 +40,9 @@ button {
   font-family: inherit;
   font-size: 13px;
   border: 1px solid var(--line-strong);
-  background: var(--panel);
+  background: #fbfdff;
   color: var(--ink);
+  box-shadow: inset 0 1px 1px rgba(20, 34, 51, 0.03);
   border-radius: 7px;
   padding: 6px 11px;
   cursor: pointer;
@@ -56,8 +57,9 @@ input, select {
   border: 1px solid var(--line-strong);
   border-radius: 7px;
   padding: 6px 9px;
-  background: var(--panel);
+  background: #fbfdff;
   color: var(--ink);
+  box-shadow: inset 0 1px 1px rgba(20, 34, 51, 0.03);
 }
 input:focus, select:focus { outline: 2px solid var(--accent-weak); border-color: var(--accent); }
 input.invalid { border-color: var(--del); background: #fff2f1; }
