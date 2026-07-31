@@ -3,14 +3,17 @@
 // absent, calls resolve to an unavailable/empty result and the UI hides them.
 
 const CLIENT_CACHE_LIMIT = 512
+const OFFTARGET_CLIENT_CACHE_LIMIT = 10_000
+const spacerMatchCache = new Map()
 const canonicalExonRequests = new Map()
+const geneSuggestionCache = new Map()
+const nearbyFeatureCache = new Map()
 const variantCache = new Map()
 let statusRequest = null
-
-function setBounded(cache, key, value) {
+function setBounded(cache, key, value, limit = CLIENT_CACHE_LIMIT) {
   cache.delete(key)
   cache.set(key, value)
-  while (cache.size > CLIENT_CACHE_LIMIT) cache.delete(cache.keys().next().value)
+  while (cache.size > limit) cache.delete(cache.keys().next().value)
 }
 
 export function genomicsStatus() {
@@ -43,43 +46,55 @@ export function fetchCanonicalExons({ assembly, gene }) {
   return canonicalExonRequests.get(key)
 }
 
-
-export async function fetchNearbyFeatures({ assembly, chrom, start, end }, signal) {
+export async function fetchGeneSuggestions({ assembly, query, limit = 8 }, signal) {
+  const term = query.trim()
+  const key = `${assembly}|${term.toUpperCase()}|${limit}`
+  if (geneSuggestionCache.has(key)) {
+    const cached = geneSuggestionCache.get(key)
+    setBounded(geneSuggestionCache, key, cached)
+    return cached
+  }
   try {
-    const midpoint = Math.floor((start + end) / 2)
-    const ranges = [[start, midpoint], [midpoint + 1, end]].filter(([a, b]) => b >= a)
-    const payloads = await Promise.all(ranges.map(async ([a, b]) => {
-      const params = new URLSearchParams({
-        assembly, chrom: String(chrom), start: String(a), end: String(b),
-      })
-      const res = await fetch(`/api/genomics/annotations?${params}`, { signal })
-      if (!res.ok) throw new Error(String(res.status))
-      return (await res.json()).features
-    }))
-
-    const genes = new Map()
-    const transcripts = new Map()
-    const exons = new Map()
-    payloads.forEach((features) => {
-      features.genes.forEach((gene) => genes.set(gene.id, gene))
-      features.transcripts.forEach((transcript) => transcripts.set(transcript.id, transcript))
-      features.exons.forEach((exon) => exons.set(`${exon.transcript}:${exon.start}:${exon.end}`, exon))
+    const params = new URLSearchParams({ assembly, query: term, limit: String(limit) })
+    const response = await fetch(`/api/genomics/gene-suggestions?${params}`, { signal })
+    if (!response.ok) return []
+    const suggestions = (await response.json()).suggestions ?? []
+    setBounded(geneSuggestionCache, key, suggestions)
+    return suggestions
+  } catch (error) {
+    if (error.name === 'AbortError') throw error
+    return []
+  }
+}
+export async function fetchNearbyFeatures({ assembly, chrom, start, end }, signal) {
+  const key = `${assembly}|${chrom}|${start}|${end}`
+  if (nearbyFeatureCache.has(key)) {
+    const cached = nearbyFeatureCache.get(key)
+    setBounded(nearbyFeatureCache, key, cached)
+    return cached
+  }
+  try {
+    const params = new URLSearchParams({
+      assembly, chrom: String(chrom), start: String(start), end: String(end),
     })
+    const response = await fetch(`/api/genomics/annotations?${params}`, { signal })
+    if (!response.ok) throw new Error(String(response.status))
+    const features = (await response.json()).features
 
     const exonsByTranscript = new Map()
-    exons.forEach((exon) => {
+    features.exons.forEach((exon) => {
       const list = exonsByTranscript.get(exon.transcript) ?? []
       list.push(exon)
       exonsByTranscript.set(exon.transcript, list)
     })
     const transcriptsByGene = new Map()
-    transcripts.forEach((transcript) => {
+    features.transcripts.forEach((transcript) => {
       const list = transcriptsByGene.get(transcript.gene) ?? []
       list.push(transcript)
       transcriptsByGene.set(transcript.gene, list)
     })
 
-    return [...genes.values()].map((gene) => {
+    const result = features.genes.map((gene) => {
       const candidates = transcriptsByGene.get(gene.id) ?? []
       const transcript = candidates.sort((a, b) => (
         Number(b.isCanonical) - Number(a.isCanonical) ||
@@ -90,6 +105,8 @@ export async function fetchNearbyFeatures({ assembly, chrom, start, end }, signa
         exons: transcript ? (exonsByTranscript.get(transcript.id) ?? []) : [],
       }
     }).sort((a, b) => a.start - b.start || b.end - a.end)
+    setBounded(nearbyFeatureCache, key, result)
+    return result
   } catch (err) {
     if (err.name === 'AbortError') throw err
     return []
@@ -117,6 +134,7 @@ export async function fetchVariants({ source, assembly, chrom, start, end }, sig
 }
 
 const OFFTARGET_BUSY_RETRIES = 6
+const OFFTARGET_BATCH_SIZE = 100
 const offTargetCache = new Map()
 
 const offTargetCacheKey = (assembly, pam, guide) => [
@@ -155,47 +173,98 @@ function abortableDelay(ms, signal) {
   })
 }
 
-export async function fetchOffTargets({ assembly, pam, guides }, signal) {
+export async function fetchSpacerMatches({ assembly, spacer, pam }, signal) {
+  const normalized = spacer.trim().toUpperCase()
+  const key = `${assembly}|${pam.toUpperCase()}|${normalized}`
+  if (spacerMatchCache.has(key)) {
+    const payload = spacerMatchCache.get(key)
+    setBounded(spacerMatchCache, key, payload)
+    return payload
+  }
+  for (let attempt = 0; attempt <= OFFTARGET_BUSY_RETRIES; attempt += 1) {
+    const response = await fetch('/api/genomics/spacer-matches', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assembly, spacer: normalized, pam }),
+      signal,
+    })
+    if (response.status === 429 && attempt < OFFTARGET_BUSY_RETRIES) {
+      const retryAfter = Number(response.headers.get('Retry-After') ?? 5)
+      await abortableDelay(Math.max(1, retryAfter) * 1000, signal)
+      continue
+    }
+    if (!response.ok) {
+      let detail = `spacer search returned ${response.status}`
+      try { detail = (await response.json())?.detail ?? detail } catch { /* non-JSON response */ }
+      throw new Error(detail)
+    }
+    const payload = await response.json()
+    if (payload.available) setBounded(spacerMatchCache, key, payload)
+    return payload
+  }
+  return { available: false, matches: [], detail: 'genome search remained busy' }
+}
+async function fetchOffTargetBatch({ assembly, pam, guides }, signal) {
+  for (let attempt = 0; attempt <= OFFTARGET_BUSY_RETRIES; attempt += 1) {
+    const response = await fetch('/api/genomics/offtargets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assembly, pam, guides }),
+      signal,
+    })
+    if (response.status === 429 && attempt < OFFTARGET_BUSY_RETRIES) {
+      const retryAfter = Number(response.headers.get('Retry-After') ?? 5)
+      await abortableDelay(Math.max(1, retryAfter) * 1000, signal)
+      continue
+    }
+    if (!response.ok) {
+      let detail = `off-target service returned ${response.status}`
+      try { detail = (await response.json())?.detail ?? detail } catch { /* non-JSON response */ }
+      return { available: false, guides: [], detail, status: response.status }
+    }
+    return response.json()
+  }
+  return { available: false, guides: [], detail: 'off-target service remained busy' }
+}
+
+export async function fetchOffTargets({ assembly, pam, guides }, signal, onProgress) {
   const cached = cachedOffTargets({ assembly, pam, guides })
   if (!cached.missing.length) {
-    return { available: true, guides: Object.values(cached.byGuide), detail: null }
+    return { available: true, guides: Object.values(cached.byGuide), pendingIds: [], detail: null }
   }
 
   try {
-    for (let attempt = 0; attempt <= OFFTARGET_BUSY_RETRIES; attempt += 1) {
-      const res = await fetch('/api/genomics/offtargets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ assembly, pam, guides: cached.missing }),
-        signal,
-      })
-      if (res.status === 429 && attempt < OFFTARGET_BUSY_RETRIES) {
-        const retryAfter = Number(res.headers.get('Retry-After') ?? 5)
-        await abortableDelay(Math.max(1, retryAfter) * 1000, signal)
-        continue
-      }
-      if (!res.ok) {
-        let detail = `off-target service returned ${res.status}`
-        try { detail = (await res.json())?.detail ?? detail } catch { /* non-JSON response */ }
-        return { available: false, guides: Object.values(cached.byGuide), detail, status: res.status }
-      }
-
-      const payload = await res.json()
+    for (let offset = 0; offset < cached.missing.length; offset += OFFTARGET_BATCH_SIZE) {
+      const batch = cached.missing.slice(offset, offset + OFFTARGET_BATCH_SIZE)
+      const payload = await fetchOffTargetBatch({ assembly, pam, guides: batch }, signal)
       if (payload.available) {
-        const requestsById = new Map(cached.missing.map((guide) => [guide.id, guide]))
+        const requestsById = new Map(batch.map((guide) => [guide.id, guide]))
         for (const result of payload.guides) {
           const guide = requestsById.get(result.id)
           if (!guide) continue
           const stored = { ...result }
           delete stored.id
-          setBounded(offTargetCache, offTargetCacheKey(assembly, pam, guide), stored)
+          setBounded(offTargetCache, offTargetCacheKey(assembly, pam, guide), stored, OFFTARGET_CLIENT_CACHE_LIMIT)
           cached.byGuide[guide.id] = { ...stored, id: guide.id }
         }
       }
-      return { ...payload, guides: Object.values(cached.byGuide) }
+      const pendingIds = cached.missing.slice(offset + batch.length).map((guide) => guide.id)
+      const progress = {
+        available: payload.available || Object.keys(cached.byGuide).length > 0,
+        guides: Object.values(cached.byGuide),
+        pendingIds,
+      }
+      onProgress?.(progress)
+      if (!payload.available) return { ...payload, ...progress, pendingIds: [] }
     }
-  } catch (err) {
-    if (err.name === 'AbortError') throw err
-    return { available: false, guides: Object.values(cached.byGuide), detail: String(err) }
+    return { available: true, guides: Object.values(cached.byGuide), pendingIds: [], detail: null }
+  } catch (error) {
+    if (error.name === 'AbortError') throw error
+    return {
+      available: Object.keys(cached.byGuide).length > 0,
+      guides: Object.values(cached.byGuide),
+      pendingIds: [],
+      detail: String(error),
+    }
   }
 }

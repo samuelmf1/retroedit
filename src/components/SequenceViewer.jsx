@@ -42,7 +42,7 @@ function variantTooltip(v) {
     `${v.ref} → ${v.alt}${v.id ? ` · ${v.id}` : ''}`,
     `Position: ${Number(v.pos).toLocaleString()}`,
     `gnomAD alternate allele frequency: ${fmtAf(v.af)}`,
-    common && 'Concerning for guide design: frequency is ≥1%; cells carrying the alternate allele may reduce sgRNA annealing.',
+    common && 'Concerning for guide design: frequency is ≥1%; cells carrying the alternate allele may prevent sgRNA annealing.',
     v.grpmax && `Highest ancestry-group frequency: ${v.grpmax} ${fmtAf(v.af_grpmax)}`,
     v.nhomalt != null && `Observed homozygotes: ${v.nhomalt.toLocaleString()}`,
   ].filter(Boolean).join('\n')
@@ -83,6 +83,7 @@ const BASE_H = 18
 const RIBBON_H = 19 // aligned guide / donor letter row
 const CODON_H = 17
 const VAR_H = 12
+const VAR_STACK_GAP = 11
 const LANE_H = 12
 const FEAT_H = 20
 const RULER_H = 22
@@ -170,10 +171,14 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     codonCells,
     variantItems,
     focusSpan,
+    emphasizedEdit,
     nearMask,
     junctions,
     caret,
     selection,
+    sequenceSearch,
+    searchMatches = [],
+    searchMatchIndex = 0,
     selectedGuideId,
     onCaretChange,
     onSelectionChange,
@@ -197,6 +202,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
   const [overviewDragPercent, setOverviewDragPercent] = useState(null)
   const [overviewResizeRange, setOverviewResizeRange] = useState(null)
   const [variantTip, setVariantTip] = useState(null)
+  const broadOverview = Array.isArray(locusOverview?.elements)
   const dragging = useRef(false)
   const overviewDragging = useRef(false)
   const overviewResizing = useRef(null)
@@ -258,8 +264,28 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     const varRows = Array.from({ length: rowCount }, () => [])
     for (const v of variantItems ?? []) {
       const r = Math.floor(v.col / bpr)
-      if (r >= 0 && r < rowCount) varRows[r].push(v)
+      if (r >= 0 && r < rowCount) varRows[r].push({ ...v, stackLevel: 0 })
     }
+    const varMaxStack = varRows.map((items) => {
+      const byColumn = new Map()
+      items.forEach((item) => {
+        const group = byColumn.get(item.col) ?? []
+        group.push(item)
+        byColumn.set(item.col, group)
+      })
+      let maxStack = 0
+      byColumn.forEach((group) => {
+        const sources = [...new Set(group.map((item) => item.source))]
+        if (sources.length < 2) return
+        group.forEach((item) => {
+          // Earlier sources were already visible; lift them while newly added
+          // sources remain nearest the nucleotide.
+          item.stackLevel = sources.length - 1 - sources.indexOf(item.source)
+          maxStack = Math.max(maxStack, item.stackLevel)
+        })
+      })
+      return maxStack
+    })
 
     const heights = new Array(rowCount)
     const offsets = new Float64Array(rowCount + 1)
@@ -270,7 +296,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     for (let r = 0; r < rowCount; r++) {
       guideRibbonH[r] = hasGuideRibbon(r) ? RIBBON_H : 0
       donorRibbonH[r] = hasDonorRibbon(r) ? RIBBON_H : 0
-      varH[r] = varRows[r].length ? VAR_H : 0
+      varH[r] = varRows[r].length ? VAR_H + varMaxStack[r] * VAR_STACK_GAP : 0
       // Reserve the codon row only where the row actually contains coding bases.
       let coding = false
       if (codonCells) {
@@ -313,14 +339,21 @@ const SequenceViewer = forwardRef(function SequenceViewer(
 
   useImperativeHandle(ref, () => ({
     focus: () => scrollRef.current?.focus(),
-    scrollToIndex(index) {
+    scrollToIndex(index, behavior = 'smooth') {
       const el = scrollRef.current
       if (!el) return
       const row = Math.floor(index / bpr)
       const y = layout.offsets[row] - el.clientHeight / 3
-      el.scrollTo({ top: Math.max(0, y), behavior: 'smooth' })
+      el.scrollTo({ top: Math.max(0, y), behavior })
     },
-  }), [bpr, layout])
+    scrollToIndexCentered(index, behavior = 'smooth') {
+      const el = scrollRef.current
+      if (!el) return
+      const row = Math.max(0, Math.min(rowCount - 1, Math.floor(index / bpr)))
+      const rowCenter = layout.offsets[row] + layout.heights[row] / 2
+      el.scrollTo({ top: Math.max(0, rowCenter - el.clientHeight / 2), behavior })
+    },
+  }), [bpr, layout, rowCount])
 
   const boundaryAt = useCallback((event, rowStart) => {
     const rect = event.currentTarget.getBoundingClientRect()
@@ -396,6 +429,42 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     }
   }, [edited, hasSelection, reference.chrom, reference.start, selEnd, selStart])
 
+  const searchMask = useMemo(() => {
+    const mask = new Uint8Array(edited.length)
+    searchMatches.forEach((match) => {
+      const bit = match.strand === '+' ? 1 : match.strand === '-' ? 2 : 3
+      for (let index = Math.max(0, match.ds); index <= Math.min(edited.length - 1, match.de); index++) {
+        mask[index] |= bit
+      }
+    })
+    return mask
+  }, [edited.length, searchMatches])
+
+  const activeSearchMatch = searchMatches[searchMatchIndex] ?? null
+  const searchSummary = useMemo(() => {
+    const pattern = sequenceSearch?.trim()
+    if (!pattern) return null
+    const forward = searchMatches.filter((match) => match.strand === '+' || match.strand === '±').length
+    const reverse = searchMatches.filter((match) => match.strand === '-' || match.strand === '±').length
+    let range = null
+    if (activeSearchMatch) {
+      const refs = edited.slice(activeSearchMatch.ds, activeSearchMatch.de + 1)
+        .map((record) => record.ref)
+        .filter((refIndex) => refIndex != null)
+      if (refs.length) {
+        range = `${formatChrom(reference.chrom)}:${(reference.start + Math.min(...refs)).toLocaleString()}–${(reference.start + Math.max(...refs)).toLocaleString()}`
+      }
+    }
+    return {
+      count: searchMatches.length,
+      length: pattern.length,
+      forward,
+      reverse,
+      current: searchMatches.length ? searchMatchIndex + 1 : 0,
+      range,
+    }
+  }, [activeSearchMatch, edited, reference.chrom, reference.start, searchMatchIndex, searchMatches, sequenceSearch])
+
   const overviewGeometry = useMemo(() => {
     if (!locusOverview || locusOverview.end < locusOverview.start) return null
     const span = locusOverview.end - locusOverview.start + 1
@@ -445,6 +514,17 @@ const SequenceViewer = forwardRef(function SequenceViewer(
   const overviewWindowStyle = useMemo(() => {
     if (!overviewGeometry) return null
     const overviewSpan = locusOverview.end - locusOverview.start + 1
+    if (broadOverview) {
+      const center = (reference.start + reference.end) / 2
+      const centerPercent = overviewDragPercent == null
+        ? ((center - locusOverview.start) / overviewSpan) * 100
+        : overviewDragPercent
+      return {
+        left: `${Math.max(0, Math.min(100, centerPercent))}%`,
+        width: '3px',
+        transform: 'translateX(-50%)',
+      }
+    }
     if (overviewResizeRange) {
       const left = ((overviewResizeRange.start - locusOverview.start) / overviewSpan) * 100
       const width = ((overviewResizeRange.end - overviewResizeRange.start + 1) / overviewSpan) * 100
@@ -457,7 +537,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     const windowPercent = Math.min(100, ((reference.end - reference.start + 1) / overviewSpan) * 100)
     const left = Math.max(0, Math.min(100 - windowPercent, overviewDragPercent - windowPercent / 2))
     return { left: `${left}%`, width: `${windowPercent}%` }
-  }, [locusOverview, overviewDragPercent, overviewGeometry, overviewResizeRange, reference.end, reference.start])
+  }, [broadOverview, locusOverview, overviewDragPercent, overviewGeometry, overviewResizeRange, reference.end, reference.start])
 
   const overviewPosition = useCallback((event) => {
     const rect = event.currentTarget.getBoundingClientRect()
@@ -563,15 +643,32 @@ const SequenceViewer = forwardRef(function SequenceViewer(
       const rec = edited[i]
       const status = baseStatus(rec, refSeq)
       const inSel = hasSelection && i >= selStart && i < selEnd
-      const cls = [
+      const inEmphasizedEdit = emphasizedEdit && i >= emphasizedEdit.start && i <= emphasizedEdit.end
+      const commonClasses = [
         'b', status,
         nearMask[i] ? 'near' : '',
         inSel ? 'sel' : '',
+        inEmphasizedEdit ? 'edit-focus' : '',
         junctions.has(i) ? 'deljunction' : '',
+      ].filter(Boolean)
+      const activeHit = activeSearchMatch && i >= activeSearchMatch.ds && i <= activeSearchMatch.de
+      const fwdCls = [
+        ...commonClasses,
+        searchMask[i] & 1 ? 'seqmatch forward' : '',
+        activeHit && (activeSearchMatch.strand === '+' || activeSearchMatch.strand === '±') ? 'active-match' : '',
+        activeHit && i === activeSearchMatch.ds ? 'match-start' : '',
+        activeHit && i === activeSearchMatch.de ? 'match-end' : '',
+      ].filter(Boolean).join(' ')
+      const revCls = [
+        ...commonClasses,
+        searchMask[i] & 2 ? 'seqmatch reverse' : '',
+        activeHit && (activeSearchMatch.strand === '-' || activeSearchMatch.strand === '±') ? 'active-match' : '',
+        activeHit && i === activeSearchMatch.ds ? 'match-start' : '',
+        activeHit && i === activeSearchMatch.de ? 'match-end' : '',
       ].filter(Boolean).join(' ')
 
-      fwdChars.push(<span key={i} className={cls}>{rec.base}</span>)
-      revChars.push(<span key={i} className={cls}>{complementBase(rec.base)}</span>)
+      fwdChars.push(<span key={i} className={fwdCls}>{rec.base}</span>)
+      revChars.push(<span key={i} className={revCls}>{complementBase(rec.base)}</span>)
 
       if (rec.ref != null) {
         const pos = reference.start + rec.ref
@@ -604,7 +701,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
         `cut ${g.cutGenomic.toLocaleString()} · ${g.cutDist} bp from edit · GC ${(g.gc * 100).toFixed(0)}%` +
         (g.disruptsPam ? '\nedit disrupts the PAM' : g.disruptsSeed ? '\nedit disrupts the seed' : '')
       return (
-        <div key={g.id} className={`gwrap${selected ? ' selected' : ''}${dimmed ? ' dimmed' : ''}`} onClick={() => onSelectGuide(g.id)}>
+        <div key={g.id} className={`gwrap${selected ? ' selected' : ''}${dimmed ? ' dimmed' : ''}`} onClick={() => onSelectGuide(g.id, 'viewer')}>
           {proto && (
             <div className="gbar proto"
               style={{ ...proto, top, background: g.fill }} title={tip} />
@@ -621,6 +718,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     }
 
     const focusBand = focusSpan && clip(focusSpan.ds, focusSpan.de, rowStart, rowEnd)
+    const editFocusBand = emphasizedEdit && clip(emphasizedEdit.start, emphasizedEdit.end, rowStart, rowEnd)
     const selBand = hasSelection && clip(selStart, selEnd - 1, rowStart, rowEnd)
     const caretHere = caret >= rowStart && caret <= rowEnd + 1
 
@@ -728,11 +826,16 @@ const SequenceViewer = forwardRef(function SequenceViewer(
         {guideCells && guideRibbon.strand === '+' && renderGuideRibbon()}
         {donorCells && donorRibbon.orientation === 'sense' && renderDonorRibbon()}
         {varRow && (
-          <div className="vartrack" style={{ height: VAR_H, width: bpr * CHAR_W }}>
+          <div className="vartrack" style={{ height: layout.varH[r], width: bpr * CHAR_W }}>
             {varRow.map((v) => (
               <div key={`${v.pos}${v.alt}${v.source}`}
                 className={`vmark ${v.source} ${variantSeverity(v)}`}
-                style={{ left: (v.col - rowStart) * CHAR_W }}
+                style={{
+                  left: (v.col - rowStart) * CHAR_W + CHAR_W / 2,
+                  '--variant-lift': `${v.stackLevel * VAR_STACK_GAP}px`,
+                  '--variant-stem': `${4 + v.stackLevel * VAR_STACK_GAP}px`,
+                  zIndex: 2 + v.stackLevel,
+                }}
                 role="img"
                 tabIndex={0}
                 aria-label={variantTooltip(v).replaceAll('\n', '. ')}
@@ -783,6 +886,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
             >+</button>
           )}
           {focusBand && <div className="focusband" style={focusBand} />}
+          {editFocusBand && <div key={emphasizedEdit.token} className="editfocusband" style={editFocusBand} />}
           {selBand && <div className="selband" style={selBand} />}
           <div className="strand">{fwdChars}</div>
           <div className="strand">{revChars}</div>
@@ -848,7 +952,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     ? Math.max(40, overviewGeometry.laneCount * 18)
     : 30
   return (
-    <div className={`viewer${selectionSummary ? ' has-selection' : ''}`}>
+    <div className={`viewer${selectionSummary || searchSummary ? ' has-selection' : ''}${emphasizedEdit ? ' locating-edit' : ''}`}>
       <div
         className="viewer-scroll"
         ref={scrollRef}
@@ -869,7 +973,9 @@ const SequenceViewer = forwardRef(function SequenceViewer(
             aria-valuemax={locusOverview.end}
             aria-valuenow={Math.max(locusOverview.start, Math.min(locusOverview.end, Math.round((reference.start + reference.end) / 2)))}
             aria-label={`${locusOverview.label}, current window ${formatChrom(reference.chrom)}:${reference.start}-${reference.end}`}
-            title="Click or drag to move the displayed window. Click an exon to snap to it."
+            title={broadOverview
+              ? 'Click or drag to move the fixed-size displayed window.'
+              : 'Click or drag to move the displayed window. Drag either edge to resize it, or click an exon to snap to it.'}
             onPointerDown={handleOverviewPointerDown}
             onPointerMove={handleOverviewPointerMove}
             onPointerUp={handleOverviewPointerUp}
@@ -904,11 +1010,15 @@ const SequenceViewer = forwardRef(function SequenceViewer(
               </>
             )}
             {overviewWindowStyle && (
-              <span className="genomebar-window" style={overviewWindowStyle}>
-                <span className="genomebar-resize left" data-overview-resize="start"
-                  title="Drag to resize the left edge of the displayed window" />
-                <span className="genomebar-resize right" data-overview-resize="end"
-                  title="Drag to resize the right edge of the displayed window" />
+              <span className={`genomebar-window${broadOverview ? ' fixed' : ''}`} style={overviewWindowStyle}>
+                {!broadOverview && (
+                  <>
+                    <span className="genomebar-resize left" data-overview-resize="start"
+                      title="Drag to resize the left edge of the displayed window" />
+                    <span className="genomebar-resize right" data-overview-resize="end"
+                      title="Drag to resize the right edge of the displayed window" />
+                  </>
+                )}
               </span>
             )}
           </div>
@@ -947,13 +1057,22 @@ const SequenceViewer = forwardRef(function SequenceViewer(
         </div>,
         document.body,
       )}
-      {selectionSummary && (
+      {selectionSummary ? (
         <div className="selectionbar" role="status" aria-live="polite">
           <span><strong>{selectionSummary.count.toLocaleString()}</strong> bases selected</span>
           <span>Range <strong>{selectionSummary.range}</strong></span>
           <span>GC <strong>{selectionSummary.gc.toFixed(1)}%</strong></span>
         </div>
-      )}
+      ) : searchSummary ? (
+        <div className="selectionbar searchsummary" role="status" aria-live="polite">
+          <span><strong>{searchSummary.count.toLocaleString()}</strong> {searchSummary.count === 1 ? 'match' : 'matches'}</span>
+          <span><strong>{searchSummary.length.toLocaleString()}</strong> bp query</span>
+          <span>Forward <strong>{searchSummary.forward.toLocaleString()}</strong></span>
+          <span>Reverse <strong>{searchSummary.reverse.toLocaleString()}</strong></span>
+          {searchSummary.count > 0 && <span>Match <strong>{searchSummary.current} / {searchSummary.count}</strong></span>}
+          {searchSummary.range && <span>Range <strong>{searchSummary.range}</strong></span>}
+        </div>
+      ) : null}
     </div>
   )
 })

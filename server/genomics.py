@@ -16,6 +16,7 @@ import time
 import re
 import shutil
 import subprocess
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
@@ -44,7 +45,7 @@ GNOMAD_API_URL = os.environ.get("GNOMAD_API_URL", "https://gnomad.broadinstitute
 GNOMAD_API_TIMEOUT = float(os.environ.get("GNOMAD_API_TIMEOUT", "15"))
 GNOMAD_API_CACHE_TTL = int(os.environ.get("GNOMAD_API_CACHE_TTL", "900"))
 GNOMAD_API_CACHE_SIZE = int(os.environ.get("GNOMAD_API_CACHE_SIZE", "256"))
-OFFTARGET_CACHE_SIZE = int(os.environ.get("OFFTARGET_CACHE_SIZE", "4096"))
+OFFTARGET_CACHE_SIZE = int(os.environ.get("OFFTARGET_CACHE_SIZE", "10000"))
 GNOMAD_REMOTE_DATASETS = {
     "GRCh38": "gnomad_r4",
     "GRCh37": "gnomad_r2_1",
@@ -585,8 +586,15 @@ def variants(source: str, assembly: str, chrom: str, start: int, end: int) -> Va
 MAX_MM = 2  # count genomic matches up to 2 mismatches; a unique guide is 1-0-0
 MAX_HITS = 500
 MAX_GUIDES = 100
+MAX_SPACER_MATCHES = 500
+MAX_SPACER_ALIGNMENTS = MAX_SPACER_MATCHES + 1
 FAIDX_BATCH_SIZE = 2000
 COMP = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+IUPAC_BASES = {
+    "A": "A", "C": "C", "G": "G", "T": "T", "R": "AG", "Y": "CT",
+    "S": "CG", "W": "AT", "K": "GT", "M": "AC", "B": "CGT", "D": "AGT",
+    "H": "ACT", "V": "ACG", "N": "ACGT",
+}
 
 SAMTOOLS = _which("samtools")
 BGZIP = _which("bgzip")
@@ -625,6 +633,115 @@ def _gene_index(assembly: str) -> Dict[str, dict]:
             genes.setdefault(name_key, record)
             genes.setdefault(gene_id.upper(), record)
     return genes
+
+@lru_cache(maxsize=3)
+def _gene_catalog(assembly: str) -> tuple[dict, ...]:
+    """Unique stable gene records for the lightweight autocomplete."""
+    unique = {record["id"]: record for record in _gene_index(assembly).values()}
+    return tuple(sorted(unique.values(), key=lambda item: (item["name"].upper(), item["id"])))
+
+
+@lru_cache(maxsize=3)
+def _gene_position_indexes(assembly: str) -> dict[str, tuple]:
+    grouped: Dict[str, List[dict]] = {}
+    for gene in _gene_catalog(assembly):
+        chrom = str(gene["chrom"]).removeprefix("chr").upper()
+        grouped.setdefault(chrom, []).append(gene)
+
+    indexes = {}
+    for chrom, records in grouped.items():
+        genes = tuple(sorted(records, key=lambda gene: (gene["start"], gene["end"])))
+        starts = tuple(gene["start"] for gene in genes)
+        prefix_max_ends = []
+        prefix_max_indexes = []
+        best_index = 0
+        for index, gene in enumerate(genes):
+            if gene["end"] > genes[best_index]["end"]:
+                best_index = index
+            prefix_max_ends.append(genes[best_index]["end"])
+            prefix_max_indexes.append(best_index)
+        indexes[chrom] = (genes, starts, tuple(prefix_max_ends), tuple(prefix_max_indexes))
+    return indexes
+
+
+def _nearest_gene(assembly: str, chrom: str, start: int, end: int) -> Optional[dict]:
+    index = _gene_position_indexes(assembly).get(str(chrom).removeprefix("chr").upper())
+    if not index:
+        return None
+    genes, starts, prefix_max_ends, prefix_max_indexes = index
+
+    # Find overlapping genes without scanning the chromosome. Prefix maxima let
+    # us stop once no earlier interval can reach the spacer.
+    right = bisect_right(starts, end)
+    overlaps = []
+    cursor = right - 1
+    while cursor >= 0 and prefix_max_ends[cursor] >= start:
+        gene = genes[cursor]
+        if gene["end"] >= start:
+            overlaps.append(gene)
+        cursor -= 1
+    if overlaps:
+        gene = min(overlaps, key=lambda item: (item["end"] - item["start"], item["name"]))
+        return {"name": gene["name"], "id": gene["id"], "distance": 0}
+
+    candidates = []
+    left_slot = bisect_left(starts, start) - 1
+    if left_slot >= 0:
+        candidates.append(genes[prefix_max_indexes[left_slot]])
+    if right < len(genes):
+        candidates.append(genes[right])
+    if not candidates:
+        return None
+
+    def distance(gene: dict) -> int:
+        return start - gene["end"] if gene["end"] < start else gene["start"] - end
+
+    gene = min(candidates, key=lambda item: (distance(item), item["end"] - item["start"], item["name"]))
+    return {"name": gene["name"], "id": gene["id"], "distance": distance(gene)}
+
+@lru_cache(maxsize=3)
+def _gene_search_indexes(assembly: str) -> tuple[tuple, tuple]:
+    catalog = _gene_catalog(assembly)
+    names = tuple(sorted((gene["name"].upper(), gene["id"], gene) for gene in catalog))
+    ids = tuple(sorted((gene["id"].upper(), gene["id"], gene) for gene in catalog))
+    return names, ids
+
+
+def _prefix_matches(entries: tuple, term: str) -> tuple:
+    start = bisect_left(entries, (term,))
+    end = bisect_left(entries, (term + "\uffff",))
+    return entries[start:end]
+
+
+
+@router.get("/gene-suggestions")
+@lru_cache(maxsize=2048)
+def gene_suggestions(assembly: str, query: str, limit: int = 8) -> dict:
+    term = query.strip().upper().split(".", 1)[0]
+    if len(term) < 2 or term.startswith("RS") or ":" in term:
+        return {"suggestions": []}
+    limit = max(1, min(12, limit))
+    names, ids = _gene_search_indexes(assembly)
+    ranked = []
+    seen = set()
+    for rank, entries in enumerate((names, ids)):
+        for key, gene_id, gene in _prefix_matches(entries, term):
+            if gene_id in seen:
+                continue
+            seen.add(gene_id)
+            ranked.append((rank, len(key), key, gene))
+
+    # Substring fallback is useful for longer symbols, but prefix matches avoid
+    # a whole-catalog scan for the common path and for Ensembl IDs.
+    if len(ranked) < limit and len(term) >= 3 and not term.startswith("ENS"):
+        for gene in _gene_catalog(assembly):
+            name = gene["name"].upper()
+            if gene["id"] not in seen and term in name:
+                seen.add(gene["id"])
+                ranked.append((2, len(name), name, gene))
+    ranked.sort(key=lambda item: item[:3])
+    return {"suggestions": [item[3] for item in ranked[:limit]]}
+
 
 
 @lru_cache(maxsize=3)
@@ -677,7 +794,9 @@ def warm_genomic_indexes() -> None:
     """Warm small immutable indexes so the first request is not a cold start."""
     for assembly in GENE_INDEX:
         _gene_index(assembly)
+        _gene_search_indexes(assembly)
     for assembly in GENOME_FASTA:
+        _gene_position_indexes(assembly)
         _faidx_contigs(assembly)
     for path in GENCODE_GTF.values():
         if path.exists():
@@ -727,7 +846,7 @@ def _local_annotations_cached(assembly: str, chrom: str, start: int, end: int) -
         or not Path(str(path) + ".tbi").exists()
     ):
         raise HTTPException(status_code=404, detail=f"local annotations unavailable for {assembly}")
-    if start < 1 or end < start or end - start + 1 > 120_000:
+    if start < 1 or end < start or end - start + 1 > 250_000:
         raise HTTPException(status_code=422, detail="invalid or oversized annotation interval")
 
     genes: List[dict] = []
@@ -889,6 +1008,11 @@ class OffTargetRequest(BaseModel):
     guides: List[dict]  # [{id, spacer, chrom, cutGenomic}]
 
 
+class SpacerMatchRequest(BaseModel):
+    assembly: str
+    spacer: str
+    pam: str = "NGG"
+
 class GuideOffTargets(BaseModel):
     id: str
     counts: Dict[str, int]     # genomic matches by mismatch, on-target included: {"0":1,"1":0,"2":0}
@@ -904,6 +1028,8 @@ class OffTargetResponse(BaseModel):
 
 _offtarget_cache: OrderedDict[tuple, dict] = OrderedDict()
 _offtarget_cache_lock = threading.Lock()
+_spacer_match_cache: OrderedDict[tuple, dict] = OrderedDict()
+_spacer_match_cache_lock = threading.Lock()
 
 
 def _offtarget_cache_key(assembly: str, pam: str, guide: dict) -> tuple:
@@ -944,24 +1070,109 @@ def _store_offtarget(
             "unique": result.unique,
             "top": result.top,
         }
-        _offtarget_cache.move_to_end(key)
-        while len(_offtarget_cache) > max(1, OFFTARGET_CACHE_SIZE):
-            _offtarget_cache.popitem(last=False)
-
-
 def _pam_ok(seq3: str, pam: str) -> bool:
     seq3 = seq3.upper()
-    if len(seq3) < len(pam):
-        return False
-    for b, code in zip(seq3, pam):
-        if code == "N":
-            continue
-        if code == "R" and b in "AG":
-            continue
-        if b != code:
-            return False
-    return True
+    return len(seq3) >= len(pam) and all(
+        base in IUPAC_BASES.get(code, "") for base, code in zip(seq3, pam)
+    )
 
+
+@router.post("/spacer-matches")
+def spacer_matches(req: SpacerMatchRequest) -> dict:
+    assembly = req.assembly
+    spacer = req.spacer.strip().upper()
+    pam_pattern = req.pam.strip().upper()
+    if assembly not in GENOME_FASTA:
+        raise HTTPException(status_code=422, detail=f"unsupported assembly {assembly}")
+    if not re.fullmatch(r"[ACGT]{20}", spacer):
+        raise HTTPException(status_code=422, detail="spacer must be exactly 20 A/C/G/T bases")
+    if not re.fullmatch(r"[ACGTRYSWKMBDHVN]{1,8}", pam_pattern):
+        raise HTTPException(status_code=422, detail="invalid PAM pattern")
+    if not offtarget_ready(assembly):
+        return {"available": False, "matches": [], "detail": "genome search index unavailable"}
+
+    cache_key = (assembly, spacer, pam_pattern)
+    with _spacer_match_cache_lock:
+        cached = _spacer_match_cache.get(cache_key)
+        if cached is not None:
+            _spacer_match_cache.move_to_end(cache_key)
+            return cached
+
+    concrete_pams = [""]
+    for code in pam_pattern:
+        concrete_pams = [prefix + base for prefix in concrete_pams for base in IUPAC_BASES[code]]
+        if len(concrete_pams) > 256:
+            raise HTTPException(status_code=422, detail="PAM pattern is too degenerate for spacer lookup")
+    reads = "".join(f">pam{i}\n{spacer}{concrete}\n" for i, concrete in enumerate(concrete_pams))
+    try:
+        proc = subprocess.run(
+            [BOWTIE, "--mm", "--sam-nohead", "-x", str(_bowtie_index_prefix(assembly)), "-f", "-", "-v", "0",
+             "-k", str(MAX_SPACER_ALIGNMENTS), "--quiet", "-S"],
+            input=reads, capture_output=True, text=True, timeout=300,
+        )
+    except Exception as exc:
+        return {"available": False, "matches": [], "detail": f"bowtie failed: {exc}"}
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or f"exit code {proc.returncode}"
+        return {"available": False, "matches": [], "detail": f"bowtie failed: {detail}"}
+
+    pam_len = len(pam_pattern)
+    hits_by_read: Dict[str, int] = {}
+    matches_by_key = {}
+    for line in proc.stdout.splitlines():
+        if line.startswith("@"):
+            continue
+        fields = line.split("\t")
+        if len(fields) < 6 or fields[2] == "*":
+            continue
+        read_name = fields[0]
+        try:
+            pam_seq = concrete_pams[int(read_name.removeprefix("pam"))]
+        except (ValueError, IndexError):
+            continue
+        hits_by_read[read_name] = hits_by_read.get(read_name, 0) + 1
+        chrom = fields[2]
+        alignment_start = int(fields[3])
+        reverse = bool(int(fields[1]) & 16)
+        if reverse:
+            pam_start = alignment_start
+            proto_start = alignment_start + pam_len
+        else:
+            proto_start = alignment_start
+            pam_start = alignment_start + 20
+        match = {
+            "chrom": chrom,
+            "protoStart": proto_start,
+            "protoEnd": proto_start + 19,
+            "pamStart": pam_start,
+            "pamEnd": pam_start + pam_len - 1,
+            "pam": pam_seq,
+            "strand": "-" if reverse else "+",
+            "cutGenomic": proto_start + 3 if reverse else proto_start + 17,
+        }
+        matches_by_key[(chrom, proto_start, match["strand"])] = match
+
+    matches = sorted(
+        matches_by_key.values(), key=lambda item: (item["chrom"], item["protoStart"], item["strand"]),
+    )
+    display_matches = matches[:MAX_SPACER_MATCHES]
+    for match in display_matches:
+        match["nearestGene"] = _nearest_gene(
+            assembly, match["chrom"], match["protoStart"], match["protoEnd"],
+        )
+    truncated = any(count >= MAX_SPACER_ALIGNMENTS for count in hits_by_read.values()) or len(matches) > MAX_SPACER_MATCHES
+    payload = {
+        "available": True,
+        "matches": display_matches,
+        "truncated": truncated,
+        "detail": None,
+    }
+    with _spacer_match_cache_lock:
+        _spacer_match_cache[cache_key] = payload
+        _spacer_match_cache.move_to_end(cache_key)
+        while len(_spacer_match_cache) > 1024:
+            _spacer_match_cache.popitem(last=False)
+    return payload
 
 @router.post("/offtargets", response_model=OffTargetResponse)
 def offtargets(req: OffTargetRequest) -> OffTargetResponse:
@@ -1005,7 +1216,7 @@ def offtargets(req: OffTargetRequest) -> OffTargetResponse:
 
     try:
         proc = subprocess.run(
-            [BOWTIE, "-x", index_prefix, "-f", "-", "-v", str(MAX_MM),
+            [BOWTIE, "--mm", "--sam-nohead", "-x", index_prefix, "-f", "-", "-v", str(MAX_MM),
              "-k", str(MAX_HITS), "--quiet", "-S"],
             input=reads, capture_output=True, text=True, timeout=300,
         )

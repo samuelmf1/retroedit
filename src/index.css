@@ -1,10 +1,10 @@
 :root {
-  --bg: #e9eef5;
+  --bg: #e7f1f7;
   --panel: #ffffff;
   --ink: #142233;
   --muted: #536579;
-  --line: #cbd6e2;
-  --line-strong: #a9b9ca;
+  --line: #c4d8e5;
+  --line-strong: #a3bdce;
   --accent: #2f6fed;
   --accent-weak: #dce8ff;
 
@@ -18,6 +18,16 @@
   --focus: #f6d78a;
   --near: #fff8e6;
 
+  /* Okabe-Ito / Tol-derived colors: vivid and distinguishable with common
+     forms of color-vision deficiency. */
+  --variant-blue: #0072b2;
+  --variant-sky: #56b4e9;
+  --variant-orange: #e69f00;
+  --variant-vermillion: #d55e00;
+  --variant-green: #009e73;
+  --variant-purple: #aa4499;
+  --variant-gray: #596b7c;
+
   --mono: 'SF Mono', 'JetBrains Mono', ui-monospace, 'Menlo', monospace;
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 
@@ -27,6 +37,31 @@
 * { box-sizing: border-box; }
 
 html, body, #root { height: 100%; margin: 0; }
+
+.retrotooltip {
+  position: fixed; z-index: 3200; width: max-content; max-width: min(360px, calc(100vw - 24px));
+  padding: 8px 10px; border: 1px solid #3c5f86; border-radius: 8px;
+  background: #17283a; color: #f7fbff; box-shadow: 0 9px 26px rgba(13, 29, 46, 0.28);
+  font: 600 11.5px/1.4 var(--sans); letter-spacing: 0; white-space: pre-line;
+  pointer-events: none; transform: translateX(-50%); animation: retrotooltip-in 100ms ease-out;
+}
+.retrotooltip::before {
+  content: ''; position: absolute; left: var(--tooltip-arrow-left, 50%); top: -5px; width: 8px; height: 8px;
+  border-left: 1px solid #3c5f86; border-top: 1px solid #3c5f86;
+  background: #17283a; transform: translateX(-50%) rotate(45deg);
+}
+.retrotooltip.above { transform: translate(-50%, -100%); }
+.retrotooltip.above::before {
+  top: auto; bottom: -5px; border: 0; border-right: 1px solid #3c5f86;
+  border-bottom: 1px solid #3c5f86;
+}
+@keyframes retrotooltip-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .retrotooltip { animation: none; }
+}
 
 body {
   background: var(--bg);
@@ -48,7 +83,7 @@ button {
   cursor: pointer;
   transition: background 0.12s, border-color 0.12s;
 }
-button:hover:not(:disabled) { background: #f0f4f9; border-color: var(--accent); }
+button:hover:not(:disabled) { background: #edf6fa; border-color: var(--accent); }
 button:disabled { opacity: 0.45; cursor: default; }
 
 input, select {

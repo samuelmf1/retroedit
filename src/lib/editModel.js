@@ -115,7 +115,7 @@ export function describeEdits(refSeq, edited, regionStart) {
       const s = rec.ref
       const e = edited[j - 1].ref
       out.push({
-        type: 'del', refStart: s, refEnd: e, length: e - s + 1,
+        type: 'del', refStart: s, refEnd: e, displayStart: i, displayEnd: j - 1, length: e - s + 1,
         label: s === e ? `g.${pos(s)}del${refSeq[s]}` : `g.${pos(s)}_${pos(e)}del`,
       })
       i = j
@@ -137,7 +137,7 @@ export function describeEdits(refSeq, edited, regionStart) {
           : `g.${pos(left)}_${pos(right)}`
       out.push({
         type: 'ins', refStart: Math.max(0, left), refEnd: Math.min(refSeq.length - 1, right),
-        length: ins.length, label: `${anchor}ins${ins}`,
+        displayStart: i, displayEnd: j - 1, length: ins.length, label: `${anchor}ins${ins}`,
       })
       i = j
       continue
@@ -145,7 +145,7 @@ export function describeEdits(refSeq, edited, regionStart) {
 
     if (rec.ref != null && rec.base !== refSeq[rec.ref]) {
       out.push({
-        type: 'sub', refStart: rec.ref, refEnd: rec.ref, length: 1,
+        type: 'sub', refStart: rec.ref, refEnd: rec.ref, displayStart: i, displayEnd: i, length: 1,
         label: `g.${pos(rec.ref)}${refSeq[rec.ref]}>${rec.base}`,
       })
     }

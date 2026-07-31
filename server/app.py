@@ -55,7 +55,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="RetroEdit backend", lifespan=lifespan)
 _offtarget_gate = asyncio.Lock()
-app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=3)
 
 # The dev server proxies /api, but allow direct access too.
 app.add_middleware(
@@ -72,6 +72,7 @@ async def limit_expensive_request_bodies(request: Request, call_next):
     if request.method == "POST" and request.url.path in {
         "/api/score",
         "/api/genomics/offtargets",
+        "/api/genomics/spacer-matches",
     }:
         try:
             content_length = int(request.headers.get("content-length", "0"))
@@ -82,13 +83,10 @@ async def limit_expensive_request_bodies(request: Request, call_next):
                 status_code=413,
                 content={"detail": f"request body exceeds {MAX_API_BODY_BYTES} bytes"},
             )
-    if request.method == "POST" and request.url.path == "/api/genomics/offtargets":
-        if _offtarget_gate.locked():
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "off-target search is busy; retry shortly"},
-                headers={"Retry-After": "5"},
-            )
+    if request.method == "POST" and request.url.path in {
+        "/api/genomics/offtargets",
+        "/api/genomics/spacer-matches",
+    }:
         async with _offtarget_gate:
             return await call_next(request)
 
@@ -99,6 +97,10 @@ async def limit_expensive_request_bodies(request: Request, call_next):
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
     elif request.method in {"GET", "HEAD"} and request.url.path in {"/", "/index.html"}:
         response.headers["Cache-Control"] = "no-cache"
+    elif request.method in {"GET", "HEAD"} and request.url.path.startswith("/api/genomics/"):
+        response.headers["Cache-Control"] = "private, max-age=300, stale-while-revalidate=60"
+    elif request.method in {"GET", "HEAD"} and request.url.path == "/api/health":
+        response.headers["Cache-Control"] = "private, max-age=30"
     return response
 
 # gnomAD, ClinVar, annotation, and off-target endpoints.
@@ -107,6 +109,7 @@ try:
 except ImportError:
     from genomics import router as genomics_router, warm_genomic_indexes
 app.include_router(genomics_router)
+
 
 _predict_seq = None
 _import_error: Optional[str] = None

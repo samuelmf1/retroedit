@@ -1,6 +1,7 @@
-import { useCallback, useState } from 'react'
+import { lazy, Suspense, useCallback, useState } from 'react'
 import ArmSlider from './ArmSlider.jsx'
-import PlasmidModal from './PlasmidModal.jsx'
+const loadPlasmidModal = () => import('./PlasmidModal.jsx')
+const PlasmidModal = lazy(loadPlasmidModal)
 
 
 function blockingOptionLabel(option, refStart, recommendedKey) {
@@ -14,9 +15,10 @@ function blockingOptionLabel(option, refStart, recommendedKey) {
 }
 
 export default function DonorPanel({
-  donor, guide, armLeft, armRight, onArmLeft, onArmRight, onArmRatio,
+  donor, guide, armLeft, armRight, onArmLeft, onArmRight, onArmRatio, onArmTotal,
   armsCustomized, onApplyArmsToAll, orientation, onOrientation, reference,
-  blockingChoice, onBlockingChoice, scaffold, scaffoldLabel, guideChecked, onAddToLibrary, libraryCount, onExport,
+  blockingChoice, onBlockingChoice, scaffold, scaffoldLabel, guideChecked, guideNeedsUpdate,
+  onAddToLibrary, libraryCount, onExport,
 }) {
   const [plasmidOpen, setPlasmidOpen] = useState(false)
   const closePlasmid = useCallback(() => setPlasmidOpen(false), [])
@@ -30,7 +32,7 @@ export default function DonorPanel({
         <div className="donoractions">
           <div className="donoractionsleft">
             <button type="button" className="plasmidopen" disabled>View plasmid map</button>
-            <button type="button" className="libraryadd" disabled>+ Add to library</button>
+            <button type="button" className="libraryadd" disabled>+ Add to basket</button>
           </div>
           <ExportActions count={libraryCount} onExport={onExport} />
         </div>
@@ -62,6 +64,26 @@ export default function DonorPanel({
       </header>
 
       <div className="donorctl">
+        <label className="repairtemplatelength">
+          <span className="repairlengthhead">
+            <span>Repair template length</span>
+            <strong>{armTotal} nt</strong>
+          </span>
+          <span className="repairlengthcontrol">
+            <span aria-hidden="true">50</span>
+            <input
+              type="range"
+              min="50"
+              max="250"
+              step="1"
+              value={armTotal}
+              onChange={(event) => onArmTotal(Number(event.target.value))}
+              aria-label="Repair template length"
+              aria-valuetext={`${armTotal} nucleotides`}
+            />
+            <span aria-hidden="true">250 nt</span>
+          </span>
+        </label>
         <div className="field grow">
           <span>Homology arms (this guide)</span>
           <ArmSlider left={armLeft} right={armRight} onLeft={onArmLeft} onRight={onArmRight} />
@@ -181,25 +203,34 @@ export default function DonorPanel({
       <div className="donoractions">
         <div className="donoractionsleft">
           <button type="button" className="plasmidopen" disabled={!donor?.ok}
+            onPointerEnter={loadPlasmidModal} onFocus={loadPlasmidModal}
             onClick={() => setPlasmidOpen(true)}>View plasmid map</button>
-          <button type="button" className={`libraryadd${guideChecked ? ' added' : ''}`}
-            disabled={!guide.metricsReady || guideChecked}
+          <button type="button" className={`libraryadd${guideChecked && !guideNeedsUpdate ? ' added' : ''}${guideNeedsUpdate ? ' update' : ''}`}
+            disabled={!guide.metricsReady || (guideChecked && !guideNeedsUpdate)}
             title={!guide.metricsReady ? 'Available after guide scoring and off-target metrics finish' : undefined}
             onClick={onAddToLibrary}>
-            {guideChecked ? '✓ Added to library' : '+ Add to library'}
+            {guideNeedsUpdate ? '↻ Update in basket' : guideChecked ? '✓ Added to basket' : '+ Add to basket'}
           </button>
           {!guide.metricsReady && <span className="librarynote">Available when guide metrics finish</span>}
         </div>
         <ExportActions count={libraryCount} onExport={onExport} />
       </div>
-      <PlasmidModal
-        open={plasmidOpen}
-        onClose={closePlasmid}
-        spacer={guide.spacer}
-        scaffold={scaffold}
-        scaffoldLabel={scaffoldLabel}
-        repairTemplate={donor?.ssodn ?? ''}
-      />
+      {plasmidOpen && (
+        <Suspense fallback={(
+          <div className="plasmidmodal" role="dialog" aria-modal="true" aria-label="Loading plasmid viewer">
+            <div className="plasmidloading" role="status">Loading plasmid viewer…</div>
+          </div>
+        )}>
+          <PlasmidModal
+            open
+            onClose={closePlasmid}
+            spacer={guide.spacer}
+            scaffold={scaffold}
+            scaffoldLabel={scaffoldLabel}
+            repairTemplate={donor?.ssodn ?? ''}
+          />
+        </Suspense>
+      )}
     </section>
 
   )
@@ -208,7 +239,7 @@ export default function DonorPanel({
 function ExportActions({ count, onExport }) {
   return (
     <div className="donorexports">
-      <span>{count} in library</span>
+      <span>{count} in basket</span>
       <button type="button" disabled={!count} onClick={() => onExport('fasta')}>FASTA</button>
       <button type="button" disabled={!count} onClick={() => onExport('tsv')}>TSV</button>
     </div>

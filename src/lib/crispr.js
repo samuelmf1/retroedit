@@ -97,11 +97,13 @@ function anyInSpan(sorted, s, e) {
 /**
  * Find every SpCas9 protospacer+PAM on both strands whose footprint lies within
  * `windowBp` of an edited base.
+ * Pass `affected: null` to return every guide in the loaded sequence so those
+ * stable records can be filtered for new edits without repeating guide work.
  *
  * `seq` and `affected` share a coordinate space, and all returned coordinates
  * are forward-strand indices into `seq` regardless of the guide's strand.
- * Returns [] when nothing has been edited — guides are only meaningful relative
- * to an edit.
+ * With an affected-base array, returns [] until an edit exists. With `null`,
+ * returns the full guide catalog for exploration and metric precomputation.
  */
 export function findGuides({
   seq,
@@ -110,11 +112,12 @@ export function findGuides({
   affected = [],
   windowBp = DEFAULT_WINDOW_BP,
 }) {
-  if (!seq || !affected.length) return []
+  if (!seq || (affected != null && !affected.length)) return []
 
   const n = seq.length
   const pamLen = pam.length
-  const sortedEdits = [...affected].sort((a, b) => a - b)
+  const sortedEdits = affected == null ? [] : [...affected].sort((a, b) => a - b)
+  const allGuides = affected == null
 
   // Prefix sum over "is within windowBp of an edit" so span tests are O(1).
   const mask = new Uint8Array(n)
@@ -133,13 +136,14 @@ export function findGuides({
   const push = ({ strand, protoStart, protoEnd, pamStart, pamEnd, cutBefore }) => {
     const start = Math.min(protoStart, pamStart)
     const end = Math.max(protoEnd, pamEnd)
-    if (!spanNearEdit(start, end)) return
+    if (!allGuides && !spanNearEdit(start, end)) return
 
     const protoFwd = seq.slice(protoStart, protoEnd + 1)
     const pamFwd = seq.slice(pamStart, pamEnd + 1)
     const spacer = strand === '+' ? protoFwd : reverseComplement(protoFwd)
     const pamSeq = strand === '+' ? pamFwd : reverseComplement(pamFwd)
     if (/[^ACGT]/.test(spacer)) return // skip guides over assembly gaps
+    const synthesisHomopolymer = spacer.match(/([ACG])\1{4,}/)?.[0] ?? null
 
     const seedStart = strand === '+' ? protoEnd - SEED_LENGTH + 1 : protoStart
     const seedEnd = strand === '+' ? protoEnd : protoStart + SEED_LENGTH - 1
@@ -173,6 +177,7 @@ export function findGuides({
       cutBefore,
       gc: gcFraction(spacer),
       hasPolyT: spacer.includes('TTTT'),
+      synthesisHomopolymer,
       startsWithG: spacer[0] === 'G',
       editDist: distanceToSpan(sortedEdits, start, end),
       cutDist: distanceToJunction(sortedEdits, cutBefore),
@@ -215,6 +220,27 @@ export function findGuides({
   guides.sort(compareGuides)
   return guides
 }
+/**
+ * Decorate and filter stable all-guide records for a specific edit. This cheap
+ * pass preserves guide identities, so completed RS3 and off-target metrics are
+ * reused as the edit changes.
+ */
+export function guidesNearEdits(guides, affected = [], windowBp = DEFAULT_WINDOW_BP) {
+  if (!guides?.length || !affected.length) return []
+  const sortedEdits = [...affected].sort((a, b) => a - b)
+  return guides
+    .filter((guide) => distanceToSpan(sortedEdits, guide.start, guide.end) <= windowBp)
+    .map((guide) => ({
+      ...guide,
+      editDist: distanceToSpan(sortedEdits, guide.start, guide.end),
+      cutDist: distanceToJunction(sortedEdits, guide.cutBefore),
+      disruptsPam: anyInSpan(sortedEdits, guide.pamStart, guide.pamEnd),
+      disruptsSeed: anyInSpan(sortedEdits, guide.seedStart, guide.seedEnd),
+      disruptsProto: anyInSpan(sortedEdits, guide.protoStart, guide.protoEnd),
+    }))
+    .sort(compareGuides)
+}
+
 
 /**
  * Ranking used by the guide table. Guides carrying a red flag (a poly-T U6

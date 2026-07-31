@@ -1,12 +1,25 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+
+const LIBRARY_REMINDER_KEY = 'retroedit:skip-library-review-reminder'
 
 export default function GuideTable({
-  guides, hasEdits, scorable, rs3Available, rs3Model, onRs3Model, selectedGuideId, onSelect,
-  checked, onToggle, onToggleAll, offAvailable, variantWarn, showOffTargets = true,
+  guides, hasEdits, exploreMode, onExploreMode, scorable, rs3Available, rs3Model, onRs3Model,
+  selectedGuideId, onSelect, checked, onToggle, onToggleAll, offAvailable, variantWarn,
+  showOffTargets = true,
 }) {
   const [sort, setSort] = useState(null)
+  const [libraryPrompt, setLibraryPrompt] = useState(null)
+  const [skipLibraryReminder, setSkipLibraryReminder] = useState(false)
+  const [libraryReminderDisabled, setLibraryReminderDisabled] = useState(() => (
+    window.sessionStorage.getItem(LIBRARY_REMINDER_KEY) === '1'
+  ))
+  const libraryPromptButtonRef = useRef(null)
   const selectedRowRef = useRef(null)
   const visibleGuides = useMemo(() => sortGuides(guides, sort), [guides, sort])
+  const selectedRowIndex = useMemo(
+    () => visibleGuides.findIndex((guide) => guide.id === selectedGuideId),
+    [selectedGuideId, visibleGuides],
+  )
 
   const onSort = (column) => setSort((current) => (
     current?.column === column
@@ -14,35 +27,115 @@ export default function GuideTable({
       : { column, direction: column.startsWith('rs3') ? 'desc' : 'asc' }
   ))
 
-  // Reveal the selected row whenever the selection changes (e.g. a guide was
-  // clicked in the sequence viewer).
-  useEffect(() => {
-    selectedRowRef.current?.scrollIntoView({ block: 'nearest' })
-  }, [selectedGuideId, sort])
+  useLayoutEffect(() => {
+    if (selectedRowIndex < 0) return
+    const frame = requestAnimationFrame(() => {
+      selectedRowRef.current?.scrollIntoView({
+        block: 'center',
+        inline: 'nearest',
+        behavior: 'auto',
+      })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [selectedGuideId, selectedRowIndex, sort])
 
-  const ids = guides.filter((guide) => guide.metricsReady).map((guide) => guide.id)
-  const allChecked = ids.length > 0 && ids.every((id) => checked.has(id))
-  const someChecked = ids.some((id) => checked.has(id))
-  const nChecked = ids.filter((id) => checked.has(id)).length
-  const pendingCount = guides.length - ids.length
+  const readyIds = guides.filter((guide) => guide.metricsReady).map((guide) => guide.id)
+  const selectableIds = exploreMode ? [] : readyIds
+  const allChecked = selectableIds.length > 0 && selectableIds.every((id) => checked.has(id))
+  const someChecked = selectableIds.some((id) => checked.has(id))
+  const nChecked = selectableIds.filter((id) => checked.has(id)).length
+  const pendingCount = guides.length - readyIds.length
+  const exploreLabel = exploreMode
+    ? (hasEdits ? 'Show edit-specific guides' : 'Hide all guides')
+    : 'Show all guides'
+
+  const requestGuideToggle = (guide) => {
+    if (checked.has(guide.id) || libraryReminderDisabled) {
+      onToggle(guide.id)
+      return
+    }
+    setSkipLibraryReminder(false)
+    setLibraryPrompt({ kind: 'single', guideId: guide.id, spacer: guide.spacer, pam: guide.pamSeq })
+  }
+
+  const requestToggleAll = () => {
+    if (allChecked || libraryReminderDisabled) {
+      onToggleAll(selectableIds)
+      return
+    }
+    setSkipLibraryReminder(false)
+    setLibraryPrompt({
+      kind: 'all',
+      count: selectableIds.filter((id) => !checked.has(id)).length,
+    })
+  }
+
+  const closeLibraryPrompt = () => setLibraryPrompt(null)
+  const confirmLibraryAdd = () => {
+    if (!libraryPrompt) return
+    if (skipLibraryReminder) {
+      window.sessionStorage.setItem(LIBRARY_REMINDER_KEY, '1')
+      setLibraryReminderDisabled(true)
+    }
+    if (libraryPrompt.kind === 'single') onToggle(libraryPrompt.guideId)
+    else onToggleAll(selectableIds)
+    setLibraryPrompt(null)
+  }
+  const reviewLibraryGuide = () => {
+    if (libraryPrompt?.kind === 'single' && selectedGuideId !== libraryPrompt.guideId) {
+      onSelect(libraryPrompt.guideId)
+    }
+    setLibraryPrompt(null)
+  }
+
+  useEffect(() => {
+    if (!libraryPrompt) return undefined
+    const frame = requestAnimationFrame(() => libraryPromptButtonRef.current?.focus())
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') closeLibraryPrompt()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [libraryPrompt])
 
   return (
+    <>
     <section className="panel guides">
       <header className="panelhead">
         <h2>sgRNAs</h2>
         <span className="count">{guides.length}</span>
+        <button
+          type="button"
+          className={`showallguides${exploreMode ? ' active' : ''}`}
+          aria-pressed={exploreMode}
+          onClick={onExploreMode}
+          title="Explore every spacer and PAM in the displayed sequence before choosing an edit"
+        >
+          {exploreLabel}
+        </button>
         <div className="exportgroup">
-          <span className="selcount">{nChecked} selected</span>
+          {!exploreMode && <span className="selcount">{nChecked} in basket</span>}
           {sort && <button type="button" className="restoreorder" onClick={() => setSort(null)}>Restore recommended order</button>}
         </div>
       </header>
 
-      {!hasEdits && (
-        <p className="empty">Make an edit to see guides within 100 bp of it, ranked by Hsu2013 Rule Set 3 on-target score.</p>
+      {!hasEdits && !exploreMode && (
+        <p className="empty">Make an edit to see guides within 100 bp of it, ranked by Rule Set 3 on-target score.</p>
       )}
 
-      {hasEdits && guides.length === 0 && (
+      {!exploreMode && hasEdits && guides.length === 0 && (
         <p className="empty">No PAM sites within 100 bp of the edit. Try a different PAM or edit position.</p>
+      )}
+
+      {exploreMode && guides.length === 0 && (
+        <p className="empty">No complete spacer + PAM sites are present in the displayed sequence.</p>
+      )}
+
+      {exploreMode && guides.length > 0 && (
+        <p className="guideexplorehint">All guides in the displayed sequence. Choose an edit to enable edit distance, re-cut disruption, library selection, and repair-template design.</p>
       )}
 
       {guides.length > 0 && scorable && (
@@ -61,7 +154,9 @@ export default function GuideTable({
       {pendingCount > 0 && (
         <div className="guidependingnote" role="status">
           <strong>{pendingCount} pending</strong>
-          <span>Preview is available. Ability to select guides unlocks as each finishes.</span>
+          <span>{exploreMode
+            ? 'RS3 and off-target metrics are being calculated and cached for reuse after you edit.'
+            : 'Preview is available. Ability to add guides to the basket unlocks as each finishes.'}</span>
         </div>
       )}
 
@@ -70,34 +165,40 @@ export default function GuideTable({
           <table>
             <thead>
               <tr>
-                <th className="chkcol">
-                  <input
-                    type="checkbox"
-                    disabled={!ids.length}
-                    checked={allChecked}
-                    ref={(el) => { if (el) el.indeterminate = someChecked && !allChecked }}
-                    onChange={() => onToggleAll(ids)}
-                    title="Select all guides with completed metrics"
-                  />
-                </th>
-                <SortHeader column="strand" label="±" ariaLabel="guide strand" className="strandcol" sort={sort} onSort={onSort}
-                  title="Target strand: + uses the forward reference sequence; − uses its reverse complement." />
+                {!exploreMode && (
+                  <th className="chkcol">
+                    <input
+                      type="checkbox"
+                      disabled={!selectableIds.length}
+                      checked={allChecked}
+                      ref={(el) => { if (el) el.indeterminate = someChecked && !allChecked }}
+                      onChange={() => requestToggleAll()}
+                      title={allChecked ? 'Remove all completed guides from the basket' : 'Add all completed guides to the basket'}
+                    />
+                  </th>
+                )}
                 <SortHeader column="spacer" label="Spacer + PAM" sort={sort} onSort={onSort}
                   title="Guide spacer followed by the PAM, shown 5′→3′. The PAM is red and is not part of the synthesized guide RNA." />
+                <SortHeader column="strand" label="Strand" ariaLabel="guide strand" className="strandcol" sort={sort} onSort={onSort}
+                  title="Target strand: + uses the forward reference sequence; − uses its reverse complement." />
                 <SortHeader column="rs3Hsu" label="RS3 Hsu" className="num" sort={sort} onSort={onSort}
                   title="Rule Set 3 on-target activity using the Hsu2013 tracrRNA context. Higher is better; this score is not a percentage." />
                 <SortHeader column="rs3Chen" label="RS3 Chen" className="num" sort={sort} onSort={onSort}
                   title="Rule Set 3 on-target activity using the Chen2013 tracrRNA context. Higher is better; this score is not a percentage." />
                 <SortHeader column="gc" label="%GC" className="num" sort={sort} onSort={onSort}
                   title="GC percentage of the spacer; the PAM is excluded." />
-                <SortHeader column="cut" label="Cut Δ" className="num" sort={sort} onSort={onSort}
-                  title="Distance in base pairs from the predicted Cas9 cut to the nearest intended edit. Smaller is generally preferred for HDR." />
+                {!exploreMode && (
+                  <SortHeader column="cut" label="Cut Δ" className="num" sort={sort} onSort={onSort}
+                    title="Distance in base pairs from the predicted Cas9 cut to the nearest intended edit. Smaller is generally preferred for HDR." />
+                )}
                 {showOffTargets && (
                   <SortHeader column="matches" label="MM" ariaLabel="mismatch counts" className="num" sort={sort} onSort={onSort}
                     title="Genome-wide match counts shown as 0 MM · 1 MM · 2 MM. A unique guide is 1·0·0; lower off-target counts are better." />
                 )}
-                <SortHeader column="block" label="Re-cut" sort={sort} onSort={onSort}
-                  title="How the repaired allele avoids Cas9 re-cleavage: the intended edit may disrupt the PAM/seed, or the donor may require a disrupting mutation." />
+                {!exploreMode && (
+                  <SortHeader column="block" label="Re-cut" sort={sort} onSort={onSort}
+                    title="How the repaired allele avoids Cas9 re-cleavage: the intended edit may disrupt the PAM/seed, or the donor may require a disrupting mutation." />
+                )}
               </tr>
             </thead>
             <tbody>
@@ -108,22 +209,31 @@ export default function GuideTable({
                   className={`${g.id === selectedGuideId ? 'selected' : ''}${g.metricsReady ? '' : ' metrics-pending'}${variantWarn?.[g.id] ? ' common-variant' : ''}`}
                   onClick={() => onSelect(g.id)}
                 >
-                  <td className="chkcol" title={g.metricsReady ? 'Select this guide for export' : 'Preview available. Export selection unlocks when this guide’s metrics finish.'} onClick={(e) => e.stopPropagation()}>
-                    <input
-                      type="checkbox"
-                      disabled={!g.metricsReady}
-                      checked={g.metricsReady && checked.has(g.id)}
-                      title={g.metricsReady ? 'Select this guide for export' : 'Preview available; export selection unlocks when this guide’s metrics finish'}
-                      onChange={() => onToggle(g.id)}
-                    />
-                  </td>
-                  <td className="strandcol"><span className={`strandtag ${g.strand === '+' ? 'fwd' : 'rev'}`} title={g.strand === '+' ? 'Forward reference strand' : 'Reverse-complement strand'}>{g.strand}</span></td>
+                  {!exploreMode && (
+                    <td className="chkcol" title={!g.metricsReady ? 'Available after scoring and off-target metrics finish' : checked.has(g.id) ? 'Remove this guide from the basket' : 'Add this guide to the basket'} onClick={(event) => event.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        disabled={!g.metricsReady}
+                        checked={g.metricsReady && checked.has(g.id)}
+                        data-guide-library-control
+                        aria-label={!g.metricsReady ? 'Guide cannot be added until metrics finish' : checked.has(g.id) ? 'Remove guide from basket' : 'Add guide to basket'}
+                        title={!g.metricsReady ? 'Available after scoring and off-target metrics finish' : checked.has(g.id) ? 'Remove this guide from the basket' : 'Add this guide to the basket'}
+                        onChange={() => requestGuideToggle(g)}
+                      />
+                    </td>
+                  )}
                   <td className="mono spacer">
-                    {/* {g.startsWithG ? '' : <span className="g5" title="does not start with a 5′ G">·</span>} */}
-                    {g.spacer}
-                    <span className="pamsuffix">{g.pamSeq}</span>
+                    {g.spacer}<span className="pamsuffix">{g.pamSeq}</span>
                     {g.hasPolyT && (
                       <><br /><span className="flag u6" title="TTTT is a U6 Pol III termination signal">T-homopolymer U6 early terminator</span></>
+                    )}
+                    {g.synthesisHomopolymer && (
+                      <><br /><span
+                        className="flag synthesis"
+                        title={`${g.synthesisHomopolymer}: Runs of five or more A, C, or G bases may increase oligonucleotide synthesis or sequence-verification errors.`}
+                      >
+                        Homopolymer synthesis risk
+                      </span></>
                     )}
                     {variantWarn?.[g.id] && (
                       <><br /><span className="flag var" title={variantWarnTitle(variantWarn[g.id])}>
@@ -131,12 +241,13 @@ export default function GuideTable({
                       </span></>
                     )}
                   </td>
+                  <td className="strandcol"><span className={`strandtag ${g.strand === '+' ? 'fwd' : 'rev'}`} title={g.strand === '+' ? 'Forward reference strand' : 'Reverse-complement strand'}>{g.strand}</span></td>
                   <td className="num">{scoreCell(g, 'rs3Hsu', 'Hsu2013', scorable, rs3Available)}</td>
                   <td className="num">{scoreCell(g, 'rs3Chen', 'Chen2013', scorable, rs3Available)}</td>
                   <td className="num" title={`${Math.round(g.gc * 100)}% GC in the spacer (PAM excluded)`}>{Math.round(g.gc * 100)}</td>
-                  <td className="num" title={`${g.cutDist} bp from the predicted Cas9 cut to the nearest intended edit`}>{g.cutDist}</td>
+                  {!exploreMode && <td className="num" title={`${g.cutDist} bp from the predicted Cas9 cut to the nearest intended edit`}>{g.cutDist}</td>}
                   {showOffTargets && <td className="num">{offCell(g, offAvailable)}</td>}
-                  <td>{blockCell(g)}</td>
+                  {!exploreMode && <td>{blockCell(g)}</td>}
                 </tr>
               ))}
             </tbody>
@@ -144,6 +255,56 @@ export default function GuideTable({
         </div>
       )}
     </section>
+      {libraryPrompt && (
+        <div className="spacermatchbackdrop libraryreviewbackdrop" role="presentation"
+          onMouseDown={(event) => { if (event.target === event.currentTarget) closeLibraryPrompt() }}>
+          <section className="loadconfirmmodal libraryreviewmodal" role="dialog"
+            aria-labelledby="library-review-title" aria-describedby="library-review-description">
+            <div className="libraryreviewhead">
+              <button type="button" className="libraryreviewclose" aria-label="Close review dialog"
+                onClick={closeLibraryPrompt}>×</button>
+              <span className="libraryreviewicon" aria-hidden="true">+</span>
+              <div>
+                <span className="libraryrevieweyebrow">Guide basket</span>
+                <h2 id="library-review-title">Review before adding</h2>
+              </div>
+            </div>
+            {libraryPrompt.kind === 'single' ? (
+              <>
+                <div className={`libraryreviewstatus${selectedGuideId === libraryPrompt.guideId ? ' open' : ''}`}>
+                  <strong>{selectedGuideId === libraryPrompt.guideId
+                    ? 'Repair template currently open'
+                    : 'No repair template selected yet'}</strong>
+                  <span>{selectedGuideId === libraryPrompt.guideId
+                    ? 'Verify the strand, homology arms, and disrupting mutation shown in the repair-template panel.'
+                    : 'Open this guide to inspect its repair template before exporting your library.'}</span>
+                </div>
+                <code className="libraryreviewguide">{libraryPrompt.spacer}<b>{libraryPrompt.pam}</b></code>
+              </>
+            ) : (
+              <div className="libraryreviewstatus">
+                <strong>{libraryPrompt.count} guides will be added</strong>
+                <span>Repair templates may not have been reviewed individually. Verify each design before export.</span>
+              </div>
+            )}
+            <p id="library-review-description">Adding a guide to the basket saves it to the current export library; it does not confirm that its repair template is final.</p>
+            <label className="libraryreminderoption">
+              <input type="checkbox" checked={skipLibraryReminder}
+                onChange={(event) => setSkipLibraryReminder(event.target.checked)} />
+              <span>Don’t remind me again during this session</span>
+            </label>
+            <div className="libraryreviewactions">
+              <button ref={libraryPromptButtonRef} type="button" onClick={reviewLibraryGuide}>
+                {libraryPrompt.kind === 'single' ? 'Review first' : 'Cancel'}
+              </button>
+              <button type="button" className="primary" onClick={confirmLibraryAdd}>
+                Add {libraryPrompt.kind === 'all' ? `${libraryPrompt.count} guides` : 'to basket'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+    </>
   )
 }
 
@@ -254,7 +415,7 @@ function blockCell(g) {
     return <span className="blocktag seed" title="The intended edit disrupts the PAM-proximal seed, so no additional disrupting mutation is needed.">seed✓</span>
   }
   if (!g.blocking?.broke) {
-    return <span className="blocktag nonsyn" title={`No re-cut-prevention mutation was found. ${g.blocking?.reason ?? 'The repaired allele may remain susceptible to Cas9.'}`}>none</span>
+    return <span className="blocktag nonsyn" title={`No re-cut-disrupting mutation was found. ${g.blocking?.reason ?? 'The repaired allele may remain susceptible to Cas9.'}`}>none</span>
   }
   if (!g.blocking.silent) {
     return <span className="blocktag nonsyn" title={`The proposed disrupting mutation prevents re-cutting but changes the encoded amino acid. ${g.blocking.reason ?? ''}`}>non-syn</span>

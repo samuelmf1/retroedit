@@ -1,11 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import Controls from './components/Controls.jsx'
 import EditBar from './components/EditBar.jsx'
 import FeatureRibbon, { DEFAULT_GNOMAD_MAF } from './components/FeatureRibbon.jsx'
-import GuideTable from './components/GuideTable.jsx'
-import DonorPanel from './components/DonorPanel.jsx'
-import SequenceViewer from './components/SequenceViewer.jsx'
 import {
   DEFAULT_PAM,
   DEFAULT_SPACER_LENGTH,
@@ -13,6 +10,7 @@ import {
   TRACR_RNAS,
   compareGuides,
   findGuides,
+  guidesNearEdits,
   fullSgRna,
   rs3Compatible,
 } from './lib/crispr.js'
@@ -34,8 +32,9 @@ import { DEFAULT_GENOME_ID, getGenome, loadRegion, loadRegionAnnotations, regist
 import { cachedScore, checkRs3Health, scoreContexts } from './lib/rs3.js'
 import { biotypesPresent, buildFeatureItems } from './lib/features.js'
 import { CODON_TABLE, buildCodonTrack, codonAt } from './lib/codon.js'
-import { complementBase } from './lib/bio.js'
-import { cachedOffTargets, fetchCanonicalExons, fetchNearbyFeatures, fetchOffTargets, fetchVariants, genomicsStatus } from './lib/genomics.js'
+import { complementBase, findPatternIndices, reverseComplement } from './lib/bio.js'
+import { cachedOffTargets, fetchCanonicalExons, fetchNearbyFeatures, fetchOffTargets, fetchSpacerMatches, fetchVariants, genomicsStatus } from './lib/genomics.js'
+import { fetchCustomOffTargets, setCustomOffTargetReference } from './lib/customOfftargets.js'
 import { clinvarCategory } from './lib/variants.js'
 
 const DEFAULT_VIEW_OPTS = {
@@ -52,24 +51,130 @@ const POSITION_VIEW_BP = 700
 const EXON_CONTEXT_BP = 200
 const EXTEND_BP = 200
 const CUSTOM_GENOME_ID = 'custom-upload'
-const MAX_CUSTOM_BP = 10_000
+const MAX_CUSTOM_FILE_BYTES = 25 * 1024 * 1024
+const MAX_CUSTOM_RECORDS = 1_000
+const DEFAULT_ARM_TOTAL = DEFAULT_ARM_LEN * 2
+const DEFAULT_LONG_ARM = Math.round(DEFAULT_ARM_TOTAL * 0.72)
+const DEFAULT_SHORT_ARM = DEFAULT_ARM_TOTAL - DEFAULT_LONG_ARM
+
+const loadGuideTable = () => import('./components/GuideTable.jsx')
+const loadDonorPanel = () => import('./components/DonorPanel.jsx')
+const loadSequenceViewer = () => import('./components/SequenceViewer.jsx')
+const GuideTable = lazy(loadGuideTable)
+const DonorPanel = lazy(loadDonorPanel)
+const SequenceViewer = lazy(loadSequenceViewer)
+const preloadWorkspace = () => Promise.all([loadGuideTable(), loadDonorPanel(), loadSequenceViewer()])
+
+function readLocationState() {
+  const params = new URLSearchParams(window.location.search)
+  const query = params.get('q')?.trim() ?? ''
+  const pam = params.get('pam')?.trim().toUpperCase() || DEFAULT_PAM
+  const requestedGenome = params.get('genome') || DEFAULT_GENOME_ID
+  let genomeId = DEFAULT_GENOME_ID
+  try { getGenome(requestedGenome); genomeId = requestedGenome } catch { /* use the default */ }
+  return { genomeId, query, pam }
+}
+
+function writeLocationState({ genomeId, query, pam }, mode = 'push') {
+  const url = new URL(window.location.href)
+  url.search = ''
+  if (query?.trim()) {
+    url.searchParams.set('genome', genomeId)
+    url.searchParams.set('q', query.trim())
+    if (pam !== DEFAULT_PAM) url.searchParams.set('pam', pam)
+  }
+  window.history[mode === 'replace' ? 'replaceState' : 'pushState']({}, '', url)
+}
 
 const BASES = new Set(['A', 'C', 'G', 'T'])
 
-function parseCustomDna(text) {
-  const sequence = text
-    .split(/\r?\n/)
-    .filter((line) => !line.trimStart().startsWith('>'))
-    .join('')
-    .replace(/\s/g, '')
-    .toUpperCase()
-  if (!sequence) throw new Error('The uploaded file does not contain a DNA sequence.')
-  const invalid = [...new Set(sequence.replace(/[ACGTRYSWKMBDHVN]/g, ''))]
-  if (invalid.length) throw new Error(`Unsupported DNA character${invalid.length === 1 ? '' : 's'}: ${invalid.join(' ')}`)
-  if (sequence.length > MAX_CUSTOM_BP) {
-    throw new Error(`Custom DNA is ${sequence.length.toLocaleString()} bases; the limit is ${MAX_CUSTOM_BP.toLocaleString()}.`)
+const DRAFT_KEY = 'retroedit:session-draft:v1'
+const RECENT_KEY = 'retroedit:recent-searches:v1'
+
+function readJsonStorage(storage, key, fallback) {
+  try {
+    const value = JSON.parse(storage.getItem(key))
+    return value ?? fallback
+  } catch {
+    return fallback
   }
-  return sequence
+}
+
+function validDraftFor(draft, reference) {
+  if (!draft || !reference || draft.genomeId !== reference.genomeId) return false
+  if (draft.chrom !== reference.chrom || draft.start !== reference.start || draft.end !== reference.end) return false
+  if (draft.referenceSeq !== reference.seq || !Array.isArray(draft.edited)) return false
+  return draft.edited.every((record) => (
+    record && BASES.has(record.base) &&
+    (record.ref == null || (Number.isInteger(record.ref) && record.ref >= 0 && record.ref < reference.seq.length)) &&
+    (record.del == null || typeof record.del === 'boolean')
+  ))
+}
+
+function readRecentSearches() {
+  const items = readJsonStorage(window.localStorage, RECENT_KEY, [])
+  return Array.isArray(items) ? items.slice(0, 5) : []
+}
+function parseCustomFasta(text, filename) {
+  const fallbackName = filename.replace(/\.(?:fa|fasta|fna|fas|txt)$/i, '') || 'sequence'
+  const records = []
+  let name = null
+  let chunks = []
+  const seen = new Set()
+  const pushRecord = () => {
+    if (name == null && chunks.length === 0) return
+    const seq = chunks.join('').replace(/\s/g, '').toUpperCase()
+    if (!seq) throw new Error(`FASTA record "${name || fallbackName}" is empty.`)
+    const invalid = [...new Set(seq.replace(/[ACGTRYSWKMBDHVN]/g, ''))]
+    if (invalid.length) throw new Error(`Unsupported DNA character${invalid.length === 1 ? '' : 's'}: ${invalid.slice(0, 12).join(' ')}`)
+    const recordName = (name || fallbackName).trim().split(/\s+/)[0]
+    if (seen.has(recordName)) throw new Error(`Duplicate FASTA record name "${recordName}".`)
+    seen.add(recordName)
+    records.push({ name: recordName, seq, length: seq.length })
+    if (records.length > MAX_CUSTOM_RECORDS) throw new Error(`FASTA files may contain at most ${MAX_CUSTOM_RECORDS.toLocaleString()} records.`)
+    chunks = []
+  }
+  const lines = text.split(/\r?\n/)
+  const isFasta = lines.some((line) => line.trimStart().startsWith('>'))
+  if (!isFasta) {
+    name = fallbackName
+    chunks = lines
+    pushRecord()
+  } else {
+    for (const line of lines) {
+      if (line.trimStart().startsWith('>')) {
+        pushRecord()
+        name = line.trimStart().slice(1).trim()
+        if (!name) throw new Error('Every FASTA record needs a name after ">".')
+      } else if (name != null) {
+        chunks.push(line)
+      } else if (line.trim()) {
+        throw new Error('FASTA sequence data appears before the first header.')
+      }
+    }
+    pushRecord()
+  }
+  if (!records.length) throw new Error('The uploaded file does not contain a DNA sequence.')
+  return records
+}
+
+function readTextFile(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.addEventListener('progress', (event) => onProgress?.(event.loaded, event.total || file.size))
+    reader.addEventListener('load', () => resolve(reader.result))
+    reader.addEventListener('error', () => reject(reader.error || new Error('Could not read this file.')))
+    reader.readAsText(file)
+  })
+}
+
+function exportFilenameToken(value) {
+  return String(value || '')
+    .trim()
+    .normalize('NFKD')
+    .replace(/[^A-Za-z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 100) || 'designs'
 }
 
 function extendEditedSnapshot(snapshot, newRefSeq, oldRefLength, leftAdded) {
@@ -86,10 +191,11 @@ function extendEditedSnapshot(snapshot, newRefSeq, oldRefLength, leftAdded) {
 }
 
 export default function App() {
-  const [genomeId, setGenomeId] = useState(DEFAULT_GENOME_ID)
-  const [query, setQuery] = useState('')
+  const initialLocation = useMemo(readLocationState, [])
+  const [genomeId, setGenomeId] = useState(initialLocation.genomeId)
+  const [query, setQuery] = useState(initialLocation.query)
   const [loadedControls, setLoadedControls] = useState(null)
-  const [pam, setPam] = useState(DEFAULT_PAM)
+  const [pam, setPam] = useState(initialLocation.pam)
   const [rs3Model, setRs3Model] = useState('hsu2013')
   const spacerLength = DEFAULT_SPACER_LENGTH
   const loadChanged = loadedControls == null ||
@@ -104,15 +210,23 @@ export default function App() {
 
   const [caret, setCaret] = useState(0)
   const [selection, setSelection] = useState(null)
+  const [emphasizedEdit, setEmphasizedEdit] = useState(null)
+  const [sequenceSearch, setSequenceSearch] = useState('')
+  const [sequenceMatchIndex, setSequenceMatchIndex] = useState(0)
   const [selectedGuideId, setSelectedGuideId] = useState(null)
+  const [showAllGuides, setShowAllGuides] = useState(false)
+  const [allGuidesRequested, setAllGuidesRequested] = useState(false)
 
+  const [spacerMatchDialog, setSpacerMatchDialog] = useState(null)
+  const [loadConfirmOpen, setLoadConfirmOpen] = useState(false)
+  const [loadConfirmCopy, setLoadConfirmCopy] = useState(null)
   // Undo/redo stacks of the edited-sequence array.
   const [past, setPast] = useState([])
   const [future, setFuture] = useState([])
 
   // Homology arms are per-guide. `armDefault` applies to any guide that has not
   // been customised; `armMap` overrides it for specific guides.
-  const [armDefault, setArmDefault] = useState({ left: DEFAULT_ARM_LEN, right: DEFAULT_ARM_LEN, strand: null })
+  const [armDefault, setArmDefault] = useState({ left: DEFAULT_LONG_ARM, right: DEFAULT_SHORT_ARM, strand: '+' })
   const [armMap, setArmMap] = useState({})
   const [blockChoiceMap, setBlockChoiceMap] = useState({})
   const [orientation, setOrientation] = useState('auto')
@@ -121,6 +235,7 @@ export default function App() {
   const [rs3Status, setRs3Status] = useState({ rs3: false, detail: 'checking' })
 
   const [checked, setChecked] = useState(() => new Set())
+  const [librarySignatures, setLibrarySignatures] = useState({})
   const [sidebarWidth, setSidebarWidth] = useState(640)
 
   const [viewOpts, setViewOpts] = useState(DEFAULT_VIEW_OPTS)
@@ -130,60 +245,198 @@ export default function App() {
   const [exonNav, setExonNav] = useState(null)
   const [nearbyFeatures, setNearbyFeatures] = useState([])
   const [customUpload, setCustomUpload] = useState(null)
+  const [customUploadProgress, setCustomUploadProgress] = useState(null)
+  const [pendingDraft, setPendingDraft] = useState(null)
+  const [recentSearches, setRecentSearches] = useState(readRecentSearches)
 
+  const loadConfirmResolverRef = useRef(null)
+  const loadConfirmCancelRef = useRef(null)
+  const loadConfirmActionRef = useRef(null)
   const viewerRef = useRef(null)
+  const emphasizedEditTimerRef = useRef(null)
+  const viewerGuideCopyRef = useRef(null)
+  const loadRequestRef = useRef(0)
+  const loadAbortRef = useRef(null)
+  const initialLocationLoadedRef = useRef(false)
   const [overviewTarget, setOverviewTarget] = useState(null)
 
   useEffect(() => { checkRs3Health().then(setRs3Status) }, [])
   useEffect(() => { genomicsStatus().then(setGStatus) }, [])
 
+  const requestLoadConfirmation = useCallback((copy = null) => new Promise((resolve) => {
+    loadConfirmResolverRef.current?.(false)
+    loadConfirmResolverRef.current = resolve
+    setLoadConfirmCopy(copy ?? {
+      title: 'Load a different locus?',
+      description: 'This will clear your current sequence edits and design selections.',
+      action: 'Load and clear edits',
+      tone: 'danger',
+    })
+    setLoadConfirmOpen(true)
+  }), [])
+
+  const closeLoadConfirmation = useCallback((confirmed) => {
+    const resolve = loadConfirmResolverRef.current
+    loadConfirmResolverRef.current = null
+    setLoadConfirmOpen(false)
+    setLoadConfirmCopy(null)
+    resolve?.(confirmed)
+  }, [])
+
+  useEffect(() => {
+    if (!loadConfirmOpen) return undefined
+    const frame = requestAnimationFrame(() => loadConfirmCancelRef.current?.focus())
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeLoadConfirmation(false)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const first = loadConfirmCancelRef.current
+      const last = loadConfirmActionRef.current
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last?.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first?.focus()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [closeLoadConfirmation, loadConfirmOpen])
+
   const doLoad = useCallback(async (opts = {}) => {
+    if (!opts.skipLoadConfirmation && !opts.preserveLoadState && opts.historyMode !== 'none' && region && hasEdits(region.reference.seq, edited)) {
+      const proceed = await requestLoadConfirmation()
+      if (!proceed) return null
+    }
     const gid = opts.genomeId ?? genomeId
     const q = opts.query ?? query
+    const selectedPam = opts.pam ?? pam
     const custom = opts.customSequence ?? customUpload
+    const requestId = ++loadRequestRef.current
+    loadAbortRef.current?.abort()
+    const loadController = new AbortController()
+    loadAbortRef.current = loadController
+    let selectedSpacerMatch = opts.spacerMatch ?? null
+    void preloadWorkspace()
     setLoading(true)
     setError(null)
     try {
       let result
       let nextExonNav = null
       if (gid === CUSTOM_GENOME_ID) {
-        if (!custom?.seq) throw new Error('Upload a FASTA or plain-DNA file first.')
-        const center = Math.max(1, Math.ceil(custom.seq.length / 2))
-        result = await loadRegion({
-          genomeId: gid,
-          locus: {
-            chrom: 'custom', start: 1, end: custom.seq.length,
-            focus: { start: center, end: center }, gene: null, label: custom.name,
-          },
-        })
+        const record = custom?.record
+        if (!record?.seq) throw new Error('Upload a FASTA or plain-DNA file first.')
+        const end = Math.min(record.length, POSITION_VIEW_BP)
+        const center = Math.max(1, Math.ceil(end / 2))
+        const locus = opts.locus ?? {
+          chrom: record.name, start: 1, end,
+          focus: { start: center, end: center }, gene: null,
+          label: custom.records.length > 1 ? `${custom.name} · ${record.name}` : custom.name,
+        }
+        result = await loadRegion({ genomeId: gid, locus })
       } else {
         const genome = getGenome(gid)
-        let locus = opts.locus ?? await resolveLocus(q, genome, POSITION_VIEW_BP)
+        const rawQuery = q.trim()
+        if (/^[ACGT]{15,}$/i.test(rawQuery) && rawQuery.length !== 20) {
+          throw new Error(`Enter the 20-nt spacer only (${rawQuery.length} nt received). Do not include the PAM; the ${selectedPam} PAM pattern is applied automatically.`)
+        }
+        const normalizedSpacer = /^[ACGT]{20}$/i.test(rawQuery) ? rawQuery.toUpperCase() : null
+        if (normalizedSpacer && !selectedSpacerMatch) {
+          let matchedSpacer = normalizedSpacer
+          let lookup = await fetchSpacerMatches({
+            assembly: genome.assembly,
+            spacer: matchedSpacer,
+            pam: selectedPam,
+          }, loadController.signal)
+          if (!lookup.available) throw new Error(lookup.detail || 'Genome spacer search is unavailable.')
+
+          // Guide strings are normally supplied 5′→3′ in spacer orientation. If
+          // no PAM-compatible hit exists, also accept a genomic-strand 20-mer by
+          // searching its reverse complement as the actual guide sequence.
+          if (!lookup.matches?.length) {
+            const reverseSpacer = reverseComplement(normalizedSpacer)
+            if (reverseSpacer !== normalizedSpacer) {
+              const reverseLookup = await fetchSpacerMatches({
+                assembly: genome.assembly,
+                spacer: reverseSpacer,
+                pam: selectedPam,
+              }, loadController.signal)
+              if (reverseLookup.available && reverseLookup.matches?.length) {
+                matchedSpacer = reverseSpacer
+                lookup = reverseLookup
+              }
+            }
+          }
+          if (!lookup.matches?.length) {
+            throw new Error(`No exact forward- or reverse-strand genomic matches with a ${selectedPam} PAM were found for this guide.`)
+          }
+          const reverseComplemented = matchedSpacer !== normalizedSpacer
+          if (lookup.matches.length > 1) {
+            if (requestId === loadRequestRef.current) {
+              setSpacerMatchDialog({
+                spacer: normalizedSpacer,
+                matchedSpacer,
+                reverseComplemented,
+                pam: selectedPam,
+                matches: lookup.matches,
+                truncated: !!lookup.truncated,
+              })
+            }
+            return null
+          }
+          selectedSpacerMatch = lookup.matches[0]
+        }
+
+        const canonicalExonLocus = (data) => {
+          let index = data.exons.findIndex((exon) => exon.rank === 1)
+          if (index < 0) index = data.transcript.strand === -1 ? data.exons.length - 1 : 0
+          const exon = data.exons[index]
+          const geneContext = { ...data.gene, canonical: data.transcript.id }
+          nextExonNav = { ...data, index }
+          return {
+            chrom: data.chrom,
+            start: Math.max(1, exon.start - EXON_CONTEXT_BP),
+            end: exon.end + EXON_CONTEXT_BP,
+            focus: { start: exon.start, end: exon.end },
+            gene: geneContext,
+            label: `${data.gene.name} (${data.gene.id})`,
+          }
+        }
+
+        let locus
+        if (selectedSpacerMatch) {
+          const center = Math.floor((selectedSpacerMatch.protoStart + selectedSpacerMatch.protoEnd) / 2)
+          const start = Math.max(1, center - Math.floor(POSITION_VIEW_BP / 2))
+          locus = {
+            chrom: selectedSpacerMatch.chrom,
+            start,
+            end: start + POSITION_VIEW_BP - 1,
+            focus: { start: selectedSpacerMatch.protoStart, end: selectedSpacerMatch.protoEnd },
+            gene: null,
+            label: `${normalizedSpacer || q.trim().toUpperCase()} · ${selectedSpacerMatch.chrom}:${selectedSpacerMatch.protoStart.toLocaleString()}–${selectedSpacerMatch.protoEnd.toLocaleString()}`,
+          }
+        } else if (!opts.locus && !opts.preserveExonNav && !/^rs\d+$/i.test(rawQuery) && !rawQuery.includes(':')) {
+          // Resolve local genes and their canonical first exon in one request.
+          const data = await fetchCanonicalExons({ assembly: genome.assembly, gene: rawQuery })
+          locus = data?.exons?.length
+            ? canonicalExonLocus(data)
+            : await resolveLocus(q, genome, POSITION_VIEW_BP)
+        } else {
+          locus = opts.locus ?? await resolveLocus(q, genome, POSITION_VIEW_BP)
+        }
         if (opts.geneContext) locus = { ...locus, gene: opts.geneContext }
 
-        // Resolve the canonical first exon before requesting sequence. Previously
-        // gene loads fetched the initial TSS window, discarded it, then fetched
-        // the exon window, adding a full redundant request to every search.
-        if (locus.gene && !opts.preserveExonNav && !opts.locus) {
-          const data = await fetchCanonicalExons({
-            assembly: genome.assembly,
-            gene: locus.gene.id,
-          })
-          if (data?.exons?.length) {
-            let index = data.exons.findIndex((exon) => exon.rank === 1)
-            if (index < 0) index = data.transcript.strand === -1 ? data.exons.length - 1 : 0
-            const exon = data.exons[index]
-            const geneContext = { ...data.gene, canonical: data.transcript.id }
-            locus = {
-              chrom: data.chrom,
-              start: Math.max(1, exon.start - EXON_CONTEXT_BP),
-              end: exon.end + EXON_CONTEXT_BP,
-              focus: { start: exon.start, end: exon.end },
-              gene: geneContext,
-              label: `${data.gene.name} (${data.gene.id})`,
-            }
-            nextExonNav = { ...data, index }
-          }
+        // Retain the provider fallback for assemblies without a local canonical index.
+        if (locus.gene && !nextExonNav && !opts.preserveExonNav && !opts.locus) {
+          const data = await fetchCanonicalExons({ assembly: genome.assembly, gene: locus.gene.id })
+          if (data?.exons?.length) locus = canonicalExonLocus(data)
         }
 
         // Sequence and local GENCODE annotations are independent reads. Fetch
@@ -205,8 +458,29 @@ export default function App() {
         result = annotations ? { ...loaded, ...annotations } : loaded
       }
 
+      // A newer search may finish first. Never let this older response replace it.
+      if (requestId !== loadRequestRef.current) return null
       if (!opts.preserveLoadState) {
-        setLoadedControls({ genomeId: gid, query: q.trim(), pam })
+        setSequenceSearch('')
+        setSequenceMatchIndex(0)
+        if (gid !== CUSTOM_GENOME_ID) {
+          const draft = readJsonStorage(window.sessionStorage, DRAFT_KEY, null)
+          setPendingDraft(validDraftFor(draft, result.reference) ? draft : null)
+          const recent = { genomeId: gid, query: q.trim(), pam: selectedPam }
+          setRecentSearches((current) => {
+            const next = [recent, ...current.filter((item) => (
+              item.genomeId !== recent.genomeId || item.query !== recent.query || item.pam !== recent.pam
+            ))].slice(0, 5)
+            window.localStorage.setItem(RECENT_KEY, JSON.stringify(next))
+            return next
+          })
+        } else {
+          setPendingDraft(null)
+        }
+        setLoadedControls({ genomeId: gid, query: q.trim(), pam: selectedPam })
+        if (opts.historyMode !== 'none' && gid !== CUSTOM_GENOME_ID) {
+          writeLocationState({ genomeId: gid, query: q, pam: selectedPam }, opts.historyMode)
+        }
       }
       setRegion(result)
       setEdited(makeEdited(result.reference.seq))
@@ -215,34 +489,103 @@ export default function App() {
       setArmMap({})
       setBlockChoiceMap({})
       setSelection(null)
-      setSelectedGuideId(null)
+      const selectedSpacerGuideId = selectedSpacerMatch
+        ? `${selectedSpacerMatch.strand}${selectedSpacerMatch.protoStart - result.reference.start}`
+        : null
+      setSelectedGuideId(selectedSpacerGuideId)
+      setShowAllGuides(!!selectedSpacerMatch)
+      setAllGuidesRequested(!!selectedSpacerMatch)
+      setSpacerMatchDialog(null)
       if (!opts.preserveExonNav) setExonNav(nextExonNav)
-      const focusIdx = result.focus.start - result.reference.start
+      const focusIdx = selectedSpacerMatch
+        ? selectedSpacerMatch.protoStart - result.reference.start
+        : result.focus.start - result.reference.start
       setCaret(Math.max(0, Math.min(result.reference.seq.length, focusIdx)))
-      requestAnimationFrame(() => viewerRef.current?.scrollToIndex(Math.max(0, focusIdx)))
       return result
     } catch (err) {
-      setError(err.message)
+      if (requestId === loadRequestRef.current) setError(err.message)
+      return null
     } finally {
-      setLoading(false)
+      if (requestId === loadRequestRef.current) {
+        loadAbortRef.current = null
+        setLoading(false)
+      }
     }
-  }, [genomeId, query, pam, customUpload])
+  }, [genomeId, query, pam, customUpload, region, edited, requestLoadConfirmation])
+
+  useEffect(() => {
+    if (!spacerMatchDialog) return undefined
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setSpacerMatchDialog(null)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [spacerMatchDialog])
+
+  useEffect(() => {
+    if (initialLocationLoadedRef.current) return
+    initialLocationLoadedRef.current = true
+    if (initialLocation.query) void doLoad({ ...initialLocation, historyMode: 'replace' })
+  }, [doLoad, initialLocation])
+
+  useEffect(() => {
+    const restoreLocation = () => {
+      const next = readLocationState()
+      setGenomeId(next.genomeId)
+      setQuery(next.query)
+      setPam(next.pam)
+      if (next.query) {
+        void doLoad({ ...next, historyMode: 'none' })
+      } else {
+        loadRequestRef.current += 1
+        setLoading(false)
+        setError(null)
+        setLoadedControls(null)
+        setRegion(null)
+        setEdited([])
+        setPast([])
+        setFuture([])
+        setSelection(null)
+        setSelectedGuideId(null)
+        setPendingDraft(null)
+      }
+    }
+    window.addEventListener('popstate', restoreLocation)
+    return () => window.removeEventListener('popstate', restoreLocation)
+  }, [doLoad])
+
+  const cancelLoad = useCallback(() => {
+    loadRequestRef.current += 1
+    loadAbortRef.current?.abort()
+    loadAbortRef.current = null
+    setLoading(false)
+    setSpacerMatchDialog(null)
+    setError(null)
+  }, [])
 
   const handleCustomUpload = useCallback(async (file) => {
     try {
-      if (file.size > 1_000_000) throw new Error('Custom DNA files must be smaller than 1 MB.')
-      const seq = parseCustomDna(await file.text())
+      if (file.size > MAX_CUSTOM_FILE_BYTES) {
+        throw new Error(`Custom sequence files may be up to ${Math.round(MAX_CUSTOM_FILE_BYTES / 1024 / 1024)} MB.`)
+      }
+      setError(null)
+      setCustomUploadProgress({ phase: 'reading', loaded: 0, total: file.size, name: file.name })
+      const text = await readTextFile(file, (loaded, total) => {
+        setCustomUploadProgress({ phase: 'reading', loaded, total, name: file.name })
+      })
+      setCustomUploadProgress({ phase: 'parsing', loaded: file.size, total: file.size, name: file.name })
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+      const records = parseCustomFasta(text, file.name)
+      setCustomOffTargetReference(records)
       const name = file.name.replace(/\.(?:fa|fasta|fna|fas|txt)$/i, '') || 'Custom DNA'
-      const custom = { name, seq }
+      const custom = { name, records, record: records[0] }
+      const record = custom.record
       registerGenome({
         id: CUSTOM_GENOME_ID,
-        organism: 'Custom',
-        assembly: 'Uploaded DNA',
-        provider: 'static',
-        maxRegionBp: MAX_CUSTOM_BP,
-        maxFeatureBp: 0,
-        note: `${seq.length.toLocaleString()} bp`,
-        data: { chrom: 'custom', start: 1, end: seq.length, seq, features: [], cds: [] },
+        organism: 'Custom', assembly: 'Uploaded DNA', provider: 'static',
+        maxRegionBp: 300_000, maxFeatureBp: 0,
+        note: `${records.length.toLocaleString()} record${records.length === 1 ? '' : 's'}`,
+        data: { chrom: record.name, start: 1, end: record.length, seq: record.seq, features: [], cds: [] },
       })
       setCustomUpload(custom)
       setGenomeId(CUSTOM_GENOME_ID)
@@ -250,8 +593,44 @@ export default function App() {
       await doLoad({ genomeId: CUSTOM_GENOME_ID, query: name, customSequence: custom })
     } catch (err) {
       setError(err.message)
+    } finally {
+      setCustomUploadProgress(null)
     }
   }, [doLoad])
+
+  const handleCustomRecord = useCallback(async (recordName) => {
+    const record = customUpload?.records.find((item) => item.name === recordName)
+    if (!record) return
+    const next = { ...customUpload, record }
+    registerGenome({
+      id: CUSTOM_GENOME_ID,
+      organism: 'Custom', assembly: 'Uploaded DNA', provider: 'static',
+      maxRegionBp: 300_000, maxFeatureBp: 0,
+      note: `${next.records.length.toLocaleString()} record${next.records.length === 1 ? '' : 's'}`,
+      data: { chrom: record.name, start: 1, end: record.length, seq: record.seq, features: [], cds: [] },
+    })
+    const result = await doLoad({ genomeId: CUSTOM_GENOME_ID, query: next.name, customSequence: next })
+    if (result) setCustomUpload(next)
+  }, [customUpload, doLoad])
+
+  const handleCustomPosition = useCallback((position) => {
+    const record = customUpload?.record
+    if (!record) return
+    const center = Math.max(1, Math.min(record.length, Math.round(Number(position) || 1)))
+    let start = Math.max(1, center - Math.floor(POSITION_VIEW_BP / 2))
+    const end = Math.min(record.length, start + POSITION_VIEW_BP - 1)
+    start = Math.max(1, end - POSITION_VIEW_BP + 1)
+    void doLoad({
+      genomeId: CUSTOM_GENOME_ID,
+      query: customUpload.name,
+      customSequence: customUpload,
+      locus: {
+        chrom: record.name, start, end,
+        focus: { start: center, end: center }, gene: null,
+        label: customUpload.records.length > 1 ? `${customUpload.name} · ${record.name}` : customUpload.name,
+      },
+    })
+  }, [customUpload, doLoad])
 
   const handleGenomeChange = useCallback((id) => {
     setGenomeId(id)
@@ -328,25 +707,45 @@ export default function App() {
   const navigateOverview = useCallback(async (center) => {
     if (!region || loading || !Number.isFinite(center)) return
     const reference = region.reference
+    const position = Math.round(center)
     const width = reference.end - reference.start + 1
     const start = Math.max(1, Math.round(center - (width - 1) / 2))
     const end = start + width - 1
     const nav = exonNav
     const geneContext = nav ? { ...nav.gene, canonical: nav.transcript.id } : reference.gene
+    const loadedQuery = loadedControls?.query?.trim() ?? ''
+    const movingFromGuideSearch = /^[ACGT]{20}$/i.test(loadedQuery)
+    const coordinateQuery = `chr${String(reference.chrom).replace(/^chr/i, '')}:${position.toLocaleString()}`
+
+    if (movingFromGuideSearch) {
+      const hasCurrentEdits = hasEdits(reference.seq, edited)
+      const proceed = await requestLoadConfirmation({
+        title: 'Change the guide search to a genomic position?',
+        description: `Moving the overview will replace ${loadedQuery} in the search field with ${coordinateQuery}.${hasCurrentEdits ? ' Current sequence edits and design selections will be cleared.' : ''}`,
+        action: 'Move to position',
+        tone: 'primary',
+      })
+      if (!proceed) return
+    }
+
     const result = await doLoad({
       preserveExonNav: true,
-      preserveLoadState: true,
+      preserveLoadState: !movingFromGuideSearch,
+      skipLoadConfirmation: movingFromGuideSearch,
+      query: movingFromGuideSearch ? coordinateQuery : undefined,
       geneContext,
       locus: {
         chrom: reference.chrom,
         start,
         end,
-        focus: { start: Math.round(center), end: Math.round(center) },
+        focus: { start: position, end: position },
         gene: geneContext,
-        label: geneContext ? `${geneContext.name} (${geneContext.id})` : `${reference.chrom}:${Math.round(center)}`,
+        label: geneContext ? `${geneContext.name} (${geneContext.id})` : coordinateQuery,
       },
     })
-    if (!result || !nav) return
+    if (!result) return
+    if (movingFromGuideSearch) setQuery(coordinateQuery)
+    if (!nav) return
     const resultCenter = (result.reference.start + result.reference.end) / 2
     let nearest = 0
     let distance = Infinity
@@ -357,7 +756,7 @@ export default function App() {
     setExonNav((current) => (
       current?.transcript?.id === nav.transcript.id ? { ...current, index: nearest } : current
     ))
-  }, [region, loading, exonNav, doLoad])
+  }, [region, loading, exonNav, doLoad, edited, loadedControls, requestLoadConfirmation])
 
   const navigateToOverviewGene = useCallback(async (gene) => {
     if (!gene || loading) return
@@ -408,7 +807,8 @@ export default function App() {
     if (!region || loading || !direction) return
     const reference = region.reference
     const start = direction < 0 ? Math.max(1, reference.start - EXTEND_BP) : reference.start
-    const end = direction > 0 ? reference.end + EXTEND_BP : reference.end
+    const recordEnd = reference.genomeId === CUSTOM_GENOME_ID ? customUpload?.record?.length : null
+    const end = direction > 0 ? Math.min(recordEnd ?? Infinity, reference.end + EXTEND_BP) : reference.end
     if (start === reference.start && end === reference.end) return
 
     setLoading(true)
@@ -445,6 +845,7 @@ export default function App() {
       } : null)
       setSelectedGuideId(null)
       setChecked(new Set())
+      setLibrarySignatures({})
       setArmMap({})
       setBlockChoiceMap({})
     } catch (err) {
@@ -452,12 +853,18 @@ export default function App() {
     } finally {
       setLoading(false)
     }
-  }, [region, loading, edited])
+  }, [region, loading, edited, customUpload])
 
 
   const refSeq = region?.reference.seq ?? ''
   const isCustomRegion = region?.reference.genomeId === CUSTOM_GENOME_ID
   const frame = region?.frame ?? null
+
+  // Discover each guide geometry once per loaded reference/PAM. Edit-specific
+  // views cheaply filter these stable records, preserving all cached metrics.
+  const allGuides = useMemo(() => (
+    region ? findGuides({ seq: refSeq, pam, spacerLength, affected: null }) : []
+  ), [region, refSeq, pam, spacerLength])
 
   const derived = useMemo(() => {
     if (!region) return null
@@ -466,9 +873,7 @@ export default function App() {
     const { dispStart, dispEnd } = buildRefToDisplay(refSeq, edited)
     const junctions = deletionJunctions(refSeq, edited)
 
-    const guides = findGuides({
-      seq: refSeq, pam, spacerLength, affected: affectedRef, windowBp: DEFAULT_WINDOW_BP,
-    })
+    const guides = guidesNearEdits(allGuides, affectedRef, DEFAULT_WINDOW_BP)
 
     const nearMask = new Uint8Array(edited.length)
     for (const a of affectedDisp) {
@@ -482,7 +887,124 @@ export default function App() {
       editList: describeEdits(refSeq, edited, region.reference.start),
       edits: hasEdits(refSeq, edited),
     }
-  }, [region, refSeq, edited, pam, spacerLength])
+  }, [region, refSeq, edited, allGuides])
+
+  const focusEditInViewer = useCallback((edit) => {
+    if (!Number.isInteger(edit?.displayStart) || !Number.isInteger(edit?.displayEnd)) return
+    window.clearTimeout(emphasizedEditTimerRef.current)
+    const next = {
+      start: edit.displayStart,
+      end: edit.displayEnd,
+      token: Date.now(),
+    }
+    setEmphasizedEdit(next)
+    requestAnimationFrame(() => {
+      viewerRef.current?.scrollToIndexCentered(Math.floor((next.start + next.end) / 2))
+    })
+    emphasizedEditTimerRef.current = window.setTimeout(() => {
+      setEmphasizedEdit(null)
+      emphasizedEditTimerRef.current = null
+    }, 1800)
+  }, [])
+
+  useEffect(() => {
+    setEmphasizedEdit(null)
+    window.clearTimeout(emphasizedEditTimerRef.current)
+    emphasizedEditTimerRef.current = null
+  }, [edited])
+
+  useEffect(() => () => window.clearTimeout(emphasizedEditTimerRef.current), [])
+
+  const exploringGuides = showAllGuides
+  const visibleGuideCandidates = exploringGuides ? allGuides : (derived?.guides ?? [])
+  // Once requested, finish and retain metrics for the entire window even after
+  // an edit switches the UI back to its focused guide subset.
+  const metricGuideCandidates = allGuidesRequested ? allGuides : visibleGuideCandidates
+
+  const sequenceMatches = useMemo(() => {
+    const pattern = sequenceSearch.trim().toUpperCase()
+    if (!pattern) return []
+    const sequence = []
+    const displayIndex = []
+    edited.forEach((record, index) => {
+      if (record.del) return
+      sequence.push(record.base)
+      displayIndex.push(index)
+    })
+    const realised = sequence.join('')
+    const reversePattern = reverseComplement(pattern)
+    const hits = new Map()
+    const addHits = (queryPattern, strand) => {
+      findPatternIndices(realised, queryPattern).forEach((start) => {
+        const ds = displayIndex[start]
+        const de = displayIndex[start + pattern.length - 1]
+        if (ds == null || de == null) return
+        const key = `${ds}:${de}`
+        const previous = hits.get(key)
+        hits.set(key, {
+          ds,
+          de,
+          strand: previous && previous.strand !== strand ? '±' : strand,
+        })
+      })
+    }
+    addHits(pattern, '+')
+    addHits(reversePattern, '-')
+    return [...hits.values()].sort((a, b) => a.ds - b.ds || a.de - b.de)
+  }, [edited, sequenceSearch])
+
+  useEffect(() => {
+    setSequenceMatchIndex((current) => (
+      sequenceMatches.length ? Math.min(current, sequenceMatches.length - 1) : 0
+    ))
+  }, [sequenceMatches.length])
+
+  useEffect(() => {
+    if (!sequenceSearch || !sequenceMatches.length) return
+    requestAnimationFrame(() => viewerRef.current?.scrollToIndex(sequenceMatches[0].ds))
+  }, [sequenceMatches, sequenceSearch])
+
+  const stepSequenceMatch = useCallback((direction) => {
+    if (!sequenceMatches.length) return
+    setSequenceMatchIndex((current) => {
+      const next = (current + direction + sequenceMatches.length) % sequenceMatches.length
+      viewerRef.current?.scrollToIndex(sequenceMatches[next].ds)
+      return next
+    })
+  }, [sequenceMatches])
+
+  // Keep a recoverable draft in this tab only. Exact reference matching prevents
+  // edits from being restored onto a changed assembly or sequence window.
+  useEffect(() => {
+    if (!region || isCustomRegion || pendingDraft) return undefined
+    if (!derived?.edits) {
+      window.sessionStorage.removeItem(DRAFT_KEY)
+      return undefined
+    }
+    const timer = window.setTimeout(() => {
+      const reference = region.reference
+      window.sessionStorage.setItem(DRAFT_KEY, JSON.stringify({
+        genomeId: reference.genomeId,
+        chrom: reference.chrom,
+        start: reference.start,
+        end: reference.end,
+        referenceSeq: reference.seq,
+        edited,
+        savedAt: Date.now(),
+      }))
+    }, 250)
+    return () => window.clearTimeout(timer)
+  }, [derived?.edits, edited, isCustomRegion, pendingDraft, region])
+
+  useEffect(() => {
+    if (!derived?.edits) return undefined
+    const warnUnsaved = (event) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', warnUnsaved)
+    return () => window.removeEventListener('beforeunload', warnUnsaved)
+  }, [derived?.edits])
 
   // Guide discovery needs sequence beyond the ±100 bp search interval so a
   // protospacer, PAM, and RS3 context can be complete at the interval edge.
@@ -507,7 +1029,7 @@ export default function App() {
   // Fetch both Rule Set 3 tracrRNA models for every guide context.
   useEffect(() => {
     if (!derived || !scorable || !rs3Status.rs3) return
-    const contexts = derived.guides.map((g) => g.context30).filter(Boolean)
+    const contexts = metricGuideCandidates.map((g) => g.context30).filter(Boolean)
     if (!contexts.length) return
     const controller = new AbortController()
     Promise.all([
@@ -521,13 +1043,13 @@ export default function App() {
       })
       .catch((err) => { if (err.name !== 'AbortError') console.error(err) })
     return () => controller.abort()
-  }, [derived?.guides, scorable, rs3Status.rs3])
+  }, [metricGuideCandidates, scorable, rs3Status.rs3])
 
   // Merge both scores and use the table-selected model for recommended order and viewer color.
   const guideView = useMemo(() => {
     if (!derived || !region) return { items: [], sorted: [] }
     const { dispStart, dispEnd } = derived
-    const items = derived.guides.map((g) => {
+    const items = visibleGuideCandidates.map((g) => {
       const rs3Hsu = g.context30 ? cachedScore(g.context30, 'Hsu2013') : undefined
       const rs3Chen = g.context30 ? cachedScore(g.context30, 'Chen2013') : undefined
       const score = rs3Model === 'chen2013' ? rs3Chen : rs3Hsu
@@ -537,7 +1059,7 @@ export default function App() {
       const pamDS = dispStart[g.pamStart]
       const pamDE = dispEnd[g.pamEnd]
       const offtarget = offTargets.byGuide[g.id]
-      const blocking = planGuideBlock({
+      const blocking = exploringGuides ? null : planGuideBlock({
         refSeq, guide: g, pam, frame, affected: derived.affectedRef,
         blockingChoice: blockChoiceMap[g.id] ?? null,
       })
@@ -552,7 +1074,9 @@ export default function App() {
           !!gStatus &&
           (!scorable || !rs3Status.rs3 || !g.context30 ||
             (typeof rs3Hsu === 'number' && typeof rs3Chen === 'number')) &&
-          (!gStatus?.offtarget?.assemblies?.[region.reference.assembly]?.ready || !offTargets.pendingIds?.has(g.id)),
+          (isCustomRegion
+            ? !offTargets.pendingIds?.has(g.id)
+            : (!gStatus?.offtarget?.assemblies?.[region.reference.assembly]?.ready || !offTargets.pendingIds?.has(g.id))),
         fill: rs3Fill(score),
         lightText: rs3NeedsLightText(score),
         offtarget,
@@ -567,7 +1091,7 @@ export default function App() {
     const sorted = [...items].sort(compareGuides)
     return { items, sorted }
     // scoreVersion re-reads the RS3 cache after async scores land.
-  }, [derived, region, rs3Model, refSeq, edited.length, scoreVersion, offTargets, pam, frame, blockChoiceMap, rs3Status, gStatus, scorable]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [derived, region, rs3Model, refSeq, edited.length, scoreVersion, offTargets, pam, frame, blockChoiceMap, rs3Status, gStatus, scorable, visibleGuideCandidates, exploringGuides]) // eslint-disable-line react-hooks/exhaustive-deps
 
 
   const biotypes = useMemo(() => (region ? biotypesPresent(region.features) : []), [region])
@@ -828,7 +1352,7 @@ export default function App() {
       .sort((a, b) => a.refIdx - b.refIdx)
     if (!common.length) return {}
     const out = {}
-    for (const g of derived.guides) {
+    for (const g of visibleGuideCandidates) {
       const hits = common.filter((v) => v.refIdx >= g.protoStart && v.refIdx <= g.pamEnd)
       if (!hits.length) continue
       const hit = hits.reduce((highest, current) => current.af > highest.af ? current : highest)
@@ -842,48 +1366,76 @@ export default function App() {
       }
     }
     return out
-  }, [derived, region, variantItems])
+  }, [derived, region, variantItems, visibleGuideCandidates])
 
-  // Wait for edits to settle before starting the memory-intensive off-target
-  // search. The server also guarantees that only one Bowtie job runs at a time.
   useEffect(() => {
     const empty = { available: false, byGuide: {}, loading: false, pendingIds: new Set() }
-    if (!region || !derived) { setOffTargets(empty); return }
+    if (!region || !derived) { setOffTargets(empty); return undefined }
     const assembly = region.reference.assembly
-    const ready = gStatus?.offtarget?.assemblies?.[assembly]?.ready
-    if (!ready) { setOffTargets(empty); return }
-    const guides = derived.guides.map((g) => ({
-      id: g.id, spacer: g.spacer, chrom: region.reference.chrom,
+    const customReference = region.reference.genomeId === CUSTOM_GENOME_ID
+    const guides = metricGuideCandidates.map((g) => ({
+      id: g.id,
+      spacer: g.spacer,
+      chrom: region.reference.chrom,
+      strand: g.strand,
+      protoGenomic: region.reference.start + g.protoStart,
       cutGenomic: region.reference.start + g.cutBefore,
     }))
     if (!guides.length) {
       setOffTargets({ available: true, byGuide: {}, loading: false, pendingIds: new Set() })
-      return
+      return undefined
     }
 
-    const cached = cachedOffTargets({ assembly, pam, guides })
-    const pendingIds = new Set(cached.missing.map((guide) => guide.id))
-    setOffTargets({
-      available: true,
-      byGuide: cached.byGuide,
-      loading: pendingIds.size > 0,
-      pendingIds,
-    })
-    if (!cached.missing.length) return
+    const applyOffTargetResults = (result, loadingNow) => {
+      const byGuide = {}
+      for (const guide of result.guides ?? []) byGuide[guide.id] = guide
+      const stillPending = new Set(result.pendingIds ?? [])
+      setOffTargets({
+        available: result.available || Object.keys(byGuide).length > 0,
+        byGuide,
+        loading: loadingNow && stillPending.size > 0,
+        pendingIds: stillPending,
+      })
+    }
 
     const controller = new AbortController()
-    const timer = setTimeout(() => {
-      fetchOffTargets({ assembly, pam, guides }, controller.signal)
-        .then((res) => {
-          const byGuide = {}
-          for (const guide of res.guides) byGuide[guide.id] = guide
-          setOffTargets({
-            available: res.available || Object.keys(byGuide).length > 0,
-            byGuide,
-            loading: false,
-            pendingIds: new Set(),
+    if (customReference) {
+      setOffTargets({
+        available: true,
+        byGuide: {},
+        loading: true,
+        pendingIds: new Set(guides.map((guide) => guide.id)),
+      })
+      const timer = setTimeout(() => {
+        fetchCustomOffTargets({ pam, guides }, controller.signal)
+          .then((result) => applyOffTargetResults(result, false))
+          .catch((err) => {
+            if (err.name !== 'AbortError') {
+              console.error(err)
+              setOffTargets({ available: false, byGuide: {}, loading: false, pendingIds: new Set() })
+            }
           })
-        })
+      }, 250)
+      return () => {
+        clearTimeout(timer)
+        controller.abort()
+      }
+    }
+
+    const ready = gStatus?.offtarget?.assemblies?.[assembly]?.ready
+    if (!ready) { setOffTargets(empty); return undefined }
+    const cached = cachedOffTargets({ assembly, pam, guides })
+    const pendingIds = new Set(cached.missing.map((guide) => guide.id))
+    setOffTargets({ available: true, byGuide: cached.byGuide, loading: pendingIds.size > 0, pendingIds })
+    if (!cached.missing.length) return undefined
+
+    const timer = setTimeout(() => {
+      fetchOffTargets(
+        { assembly, pam, guides },
+        controller.signal,
+        (progress) => applyOffTargetResults(progress, true),
+      )
+        .then((result) => applyOffTargetResults(result, false))
         .catch((err) => {
           if (err.name !== 'AbortError') {
             console.error(err)
@@ -900,7 +1452,7 @@ export default function App() {
       clearTimeout(timer)
       controller.abort()
     }
-  }, [region, derived?.guides, gStatus, pam])
+  }, [region, metricGuideCandidates, gStatus, pam])
 
   const focusSpanDisplay = useMemo(() => {
     if (!region || !derived) return null
@@ -922,6 +1474,41 @@ export default function App() {
   }, [region, derived, refSeq])
 
   const selectedGuide = guideView.items.find((g) => g.id === selectedGuideId) ?? null
+  const highlightedSequence = useMemo(() => {
+    if (!selection || selection.anchor === selection.focus) return null
+    const start = Math.min(selection.anchor, selection.focus)
+    const end = Math.max(selection.anchor, selection.focus)
+    return edited.slice(start, end).map((record) => record.base).join('')
+  }, [edited, selection])
+
+  useEffect(() => {
+    const copyViewerSequenceOrGuide = (event) => {
+      if (event.target?.closest?.('input, textarea, [contenteditable="true"]')) return
+      const browserSelection = window.getSelection?.()
+      if (browserSelection && !browserSelection.isCollapsed) return
+
+      if (highlightedSequence) {
+        event.preventDefault()
+        event.clipboardData?.setData('text/plain', highlightedSequence)
+        return
+      }
+
+      const guideId = viewerGuideCopyRef.current
+      if (!guideId || guideId !== selectedGuideId || !selectedGuide) return
+      event.preventDefault()
+      event.clipboardData?.setData('text/plain', selectedGuide.spacer)
+    }
+    document.addEventListener('copy', copyViewerSequenceOrGuide)
+    return () => document.removeEventListener('copy', copyViewerSequenceOrGuide)
+  }, [highlightedSequence, selectedGuide, selectedGuideId])
+  useEffect(() => {
+    if (!selectedGuide || !showAllGuides) return
+    const frame = requestAnimationFrame(() => {
+      viewerRef.current?.scrollToIndex(selectedGuide.ds, 'auto')
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [region?.reference.start, selectedGuide?.ds, selectedGuideId, showAllGuides])
+
   const selectedBlockingChoice = selectedGuide ? blockChoiceMap[selectedGuide.id] ?? null : null
   const setSelectedBlockingChoice = useCallback((choice) => {
     if (!selectedGuide) return
@@ -974,6 +1561,25 @@ export default function App() {
   }, [selectedGuide, selectedArms])
 
 
+  const setSelectedArmTotal = useCallback((nextTotal) => {
+    if (!selectedGuide) return
+    const currentTotal = selectedArms.left + selectedArms.right
+    if (!currentTotal) return
+    const boundedTotal = Math.max(50, Math.min(250, Math.round(nextTotal)))
+    const leftFraction = selectedArms.left / currentTotal
+    let left = Math.round(boundedTotal * leftFraction)
+    left = Math.max(10, Math.min(200, left))
+    let right = boundedTotal - left
+    if (right < 10) {
+      right = 10
+      left = boundedTotal - right
+    } else if (right > 200) {
+      right = 200
+      left = boundedTotal - right
+    }
+    setArmMap((current) => ({ ...current, [selectedGuide.id]: { left, right } }))
+  }, [selectedGuide, selectedArms])
+
   const applyArmsToAll = useCallback(() => {
     if (!selectedGuide) return
     setArmDefault({ ...selectedArms, strand: selectedGuide.strand })
@@ -981,7 +1587,7 @@ export default function App() {
   }, [selectedArms, selectedGuide])
 
   const donor = useMemo(() => {
-    if (!region || !selectedGuide || !derived) return null
+    if (!region || !selectedGuide || !derived || exploringGuides) return null
     return designDonor({
       refSeq,
       refStart: region.reference.start,
@@ -995,7 +1601,7 @@ export default function App() {
       orientation,
       blockingChoice: selectedBlockingChoice,
     })
-  }, [region, selectedGuide, derived, refSeq, edited, pam, frame, selectedArms, orientation, selectedBlockingChoice])
+  }, [region, selectedGuide, derived, refSeq, edited, pam, frame, selectedArms, orientation, selectedBlockingChoice, exploringGuides])
 
   // Aligned letter ribbons drawn directly against the track for the selected guide.
   const guideRibbon = useMemo(() => {
@@ -1032,29 +1638,66 @@ export default function App() {
   }, [donor, derived])
 
   // ---- multi-select + export ----
+  const librarySignatureFor = useCallback((id) => {
+    const guide = guideView.items.find((candidate) => candidate.id === id)
+    if (!guide) return ''
+    const arms = armsFor(guide)
+    return JSON.stringify({
+      editList: derived?.editList ?? [],
+      pam,
+      guideStrand: guide.strand,
+      armLeft: arms.left,
+      armRight: arms.right,
+      orientation,
+      blockingChoice: blockChoiceMap[id] ?? null,
+    })
+  }, [guideView.items, armsFor, derived?.editList, pam, orientation, blockChoiceMap])
+
   const toggleChecked = useCallback((id) => {
+    const removing = checked.has(id)
     setChecked((prev) => {
       const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
+      if (removing) next.delete(id)
       else next.add(id)
       return next
     })
-  }, [])
+    setLibrarySignatures((current) => {
+      const updated = { ...current }
+      if (removing) delete updated[id]
+      else updated[id] = librarySignatureFor(id)
+      return updated
+    })
+  }, [checked, librarySignatureFor])
 
-  const addChecked = useCallback((id) => {
+  const addOrUpdateChecked = useCallback((id) => {
+    const signature = librarySignatureFor(id)
     setChecked((prev) => {
       if (prev.has(id)) return prev
       const next = new Set(prev)
       next.add(id)
       return next
     })
-  }, [])
+    setLibrarySignatures((current) => ({ ...current, [id]: signature }))
+  }, [librarySignatureFor])
 
   const toggleAll = useCallback((ids) => {
-    setChecked((prev) => (ids.every((id) => prev.has(id)) ? new Set() : new Set(ids)))
-  }, [])
+    const removing = ids.every((id) => checked.has(id))
+    setChecked(removing ? new Set() : new Set(ids))
+    setLibrarySignatures(removing
+      ? {}
+      : Object.fromEntries(ids.map((id) => [id, librarySignatureFor(id)])))
+  }, [checked, librarySignatureFor])
 
-  useEffect(() => { setChecked(new Set()) }, [region])
+  useEffect(() => {
+    setChecked(new Set())
+    setLibrarySignatures({})
+  }, [region])
+
+  const selectedGuideNeedsLibraryUpdate = Boolean(
+    selectedGuide &&
+    checked.has(selectedGuide.id) &&
+    librarySignatures[selectedGuide.id] !== librarySignatureFor(selectedGuide.id)
+  )
 
   const exportGuides = useCallback((format) => {
     if (!region || !derived) return
@@ -1089,6 +1732,7 @@ export default function App() {
       }
     })
 
+    const exportStem = `retroedit_${exportFilenameToken(loadedControls?.query ?? query)}_${exportFilenameToken(pam)}`
     let text
     let filename
     if (format === 'fasta') {
@@ -1096,12 +1740,12 @@ export default function App() {
         `>${r.id}|spacer|${selectedRs3Column}=${r[selectedRs3Column]}\n${r.spacer}\n` +
         (r.repair_template ? `>${r.id}|repair_template_${r.repair_template_strand}\n${r.repair_template}\n` : ''),
       ).join('')
-      filename = 'retroedit_guides.fasta'
+      filename = `${exportStem}.fasta`
     } else {
       const cols = ['id', 'strand', 'spacer', 'pam', 'sgRNA', 'sgRNA_scaffold', selectedRs3Column, 'gc',
         'cut_genomic', 'cut_dist', 'context_30mer', 'repair_template', 'repair_template_strand', 're_cut_disruption']
       text = [cols.join('\t'), ...rows.map((r) => cols.map((c) => r[c]).join('\t'))].join('\n') + '\n'
-      filename = 'retroedit_guides.tsv'
+      filename = `${exportStem}.tsv`
     }
     const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }))
     const a = document.createElement('a')
@@ -1109,7 +1753,7 @@ export default function App() {
     a.download = filename
     a.click()
     URL.revokeObjectURL(url)
-  }, [region, derived, guideView.sorted, checked, rs3Model, refSeq, edited, pam, frame, armsFor, orientation, blockChoiceMap])
+  }, [region, derived, guideView.sorted, checked, rs3Model, refSeq, edited, pam, frame, armsFor, orientation, blockChoiceMap, loadedControls, query])
 
   // ---- panel resizing ----
   const startResize = useCallback((event) => {
@@ -1137,12 +1781,23 @@ export default function App() {
 
   // Every mutating action goes through commit(), which records history.
   const commit = useCallback((next, nextCaret) => {
+    setShowAllGuides(false)
+    setPendingDraft(null)
     setPast((p) => [...p, edited])
     setFuture([])
     setEdited(next)
     if (nextCaret != null) setCaret(nextCaret)
     setSelection(null)
   }, [edited])
+
+  const toggleGuideExplore = useCallback(() => {
+    setSelectedGuideId(null)
+    setShowAllGuides((current) => {
+      const next = !current
+      if (next) setAllGuidesRequested(true)
+      return next
+    })
+  }, [])
 
   const canUndo = past.length > 0
   const canRedo = future.length > 0
@@ -1229,17 +1884,38 @@ export default function App() {
     return () => window.removeEventListener('keydown', moveSequenceCursor, true)
   }, [edited.length, region])
 
+
+  const recoverDraft = useCallback(() => {
+    if (!pendingDraft || !region || !validDraftFor(pendingDraft, region.reference)) return
+    const recovered = pendingDraft.edited.map((record) => ({ ...record }))
+    setPast([makeEdited(region.reference.seq)])
+    setFuture([])
+    setEdited(recovered)
+    setCaret(Math.min(recovered.length, Math.max(0, recovered.findIndex((record) => record.del || record.ref == null || region.reference.seq[record.ref] !== record.base))))
+    setSelection(null)
+    setSelectedGuideId(null)
+    setPendingDraft(null)
+  }, [pendingDraft, region])
+
+  const discardDraft = useCallback(() => {
+    window.sessionStorage.removeItem(DRAFT_KEY)
+    setPendingDraft(null)
+  }, [])
   const revert = useCallback(() => {
     if (!region) return
     commit(makeEdited(region.reference.seq), 0)
     setSelectedGuideId(null)
   }, [region, commit])
 
-  const selectGuide = useCallback((id) => {
+  const selectGuide = useCallback((id, source = 'table') => {
     // Clicking the already-selected guide deselects it.
     setSelectedGuideId((cur) => {
-      if (cur === id) return null
+      if (cur === id) {
+        viewerGuideCopyRef.current = null
+        return null
+      }
       const g = guideView.items.find((x) => x.id === id)
+      viewerGuideCopyRef.current = source === 'viewer' && g ? id : null
       if (g) viewerRef.current?.scrollToIndex(g.ds)
       return id
     })
@@ -1262,19 +1938,128 @@ export default function App() {
         genomeId={genomeId} onGenome={handleGenomeChange}
         query={query} onQuery={setQuery}
         pam={pam} onPam={setPam}
-        onSearch={(example) => doLoad(example ? { query: example } : undefined)} loading={loading}
+        onSearch={(example) => doLoad(example ? { query: example } : undefined)}
+        onCancelLoad={cancelLoad}
+        loading={loading}
         onCustomUpload={handleCustomUpload}
         customMode={genomeId === CUSTOM_GENOME_ID}
         customName={customUpload?.name}
+        customRecords={customUpload?.records ?? []}
+        customRecord={customUpload?.record?.name ?? ''}
+        onCustomPosition={handleCustomPosition}
+        onCustomRecord={handleCustomRecord}
+        uploadProgress={customUploadProgress}
+        recentSearches={recentSearches}
+        onRecent={(item) => {
+          setGenomeId(item.genomeId)
+          setQuery(item.query)
+          setPam(item.pam)
+          void doLoad({ ...item })
+
+        }}
+        onClearRecent={() => {
+          window.localStorage.removeItem(RECENT_KEY)
+          setRecentSearches([])
+        }}
+        onClearSelection={setSelection}
         loadChanged={loadChanged}
       />
+      {loadConfirmOpen && (
+        <div
+          className="spacermatchbackdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeLoadConfirmation(false)
+          }}
+        >
+          <section className="loadconfirmmodal" role="dialog" aria-modal="true" aria-labelledby="load-confirm-title" aria-describedby="load-confirm-description">
+            <div className="loadconfirmbrand">RetroEdit</div>
+            <h2 id="load-confirm-title">{loadConfirmCopy?.title}</h2>
+            <p id="load-confirm-description">{loadConfirmCopy?.description}</p>
+            <div className="loadconfirmactions">
+              <button ref={loadConfirmCancelRef} type="button" onClick={() => closeLoadConfirmation(false)}>Cancel</button>
+              <button ref={loadConfirmActionRef} type="button" className={loadConfirmCopy?.tone ?? 'danger'} onClick={() => closeLoadConfirmation(true)}>{loadConfirmCopy?.action}</button>
+            </div>
+          </section>
+        </div>
+      )}
 
-      {error && <div className="banner error">⚠ {error}</div>}
+      {spacerMatchDialog && (
+        <div
+          className="spacermatchbackdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setSpacerMatchDialog(null)
+          }}
+        >
+          <section className="spacermatchmodal" role="dialog" aria-modal="true" aria-labelledby="spacer-match-title">
+            <header>
+              <div>
+                <h2 id="spacer-match-title">Choose a genomic spacer match</h2>
+                <p>
+                  <code>{spacerMatchDialog.spacer}</code>
+                  {spacerMatchDialog.reverseComplemented ? (
+                    <> matches the reverse-strand guide <code>{spacerMatchDialog.matchedSpacer}</code> at {spacerMatchDialog.matches.length.toLocaleString()} sites with a {spacerMatchDialog.pam} PAM.</>
+                  ) : (
+                    <> has {spacerMatchDialog.matches.length.toLocaleString()} exact matches on either genomic strand with a {spacerMatchDialog.pam} PAM.</>
+                  )}
+                </p>
+              </div>
+              <button type="button" className="spacermatchclose" aria-label="Close" onClick={() => setSpacerMatchDialog(null)}>×</button>
+            </header>
+            {spacerMatchDialog.truncated && (
+              <p className="spacermatchwarning">The result limit was reached; refine the spacer or choose from the matches shown.</p>
+            )}
+            <div className="spacermatchlist" role="list" aria-label="Exact genomic matches">
+              {spacerMatchDialog.matches.map((match) => {
+                const chrom = String(match.chrom).replace(/^chr/i, '')
+                return (
+                  <button
+                    type="button"
+                    role="listitem"
+                    key={`${match.chrom}:${match.protoStart}:${match.strand}`}
+                    onClick={() => {
+                      const spacer = spacerMatchDialog.spacer
+                      setSpacerMatchDialog(null)
+                      void doLoad({ query: spacer, spacerMatch: match })
+                    }}
+                  >
+                    <span>
+                      <strong>chr{chrom}:{match.protoStart.toLocaleString()}–{match.protoEnd.toLocaleString()}</strong>
+                      {match.nearestGene && (
+                        <small className="spacermatchgene" title={match.nearestGene.id}>
+                          <b>{match.nearestGene.name}</b>
+                          {match.nearestGene.distance === 0
+                            ? ' · within gene'
+                            : ` · ${match.nearestGene.distance.toLocaleString()} bp away`}
+                        </small>
+                      )}
+                      <small>{match.strand} strand</small>
+                    </span>
+                    <span className="spacermatchpam">PAM <code>{match.pam}</code><b aria-hidden="true">→</b></span>
+                  </button>
+                )
+              })}
+            </div>
+          </section>
+        </div>
+      )}
 
+      {error && <div className="banner error" role="alert">⚠ {error}</div>}
+
+      {pendingDraft && (
+        <div className="banner draftnotice" role="status">
+          <span><strong>Unsaved edits found.</strong> Recover the draft from this browser tab?</span>
+          <div>
+            <button type="button" className="primary" onClick={recoverDraft}>Recover edits</button>
+            <button type="button" onClick={discardDraft}>Discard</button>
+          </div>
+        </div>
+      )}
       {!region && <GettingStarted />}
 
       {region && derived && (
-        <>
+        <Suspense fallback={<div className="workspaceloading" role="status">Preparing sequence editor…</div>}>
           {!isCustomRegion && <div className="locusbar">
             <FeatureRibbon
               opts={viewOpts}
@@ -1307,6 +2092,7 @@ export default function App() {
                 onUndo={undo}
                 onRedo={redo}
                 onRevert={revert}
+                onEditFocus={focusEditInViewer}
                 annotationOptions={viewOpts}
                 onAnnotationChange={setViewOpts}
                 biotypes={biotypes}
@@ -1315,6 +2101,15 @@ export default function App() {
                 inputKey={query}
                 loadedInputKey={loadedControls?.query ?? query}
                 showAnnotations={!isCustomRegion}
+                sequenceSearch={sequenceSearch}
+                onSequenceSearch={(value) => {
+                  setSequenceSearch(value)
+                  setSequenceMatchIndex(0)
+                }}
+                sequenceMatches={sequenceMatches}
+                sequenceMatchIndex={sequenceMatchIndex}
+                onPreviousSequenceMatch={() => stepSequenceMatch(-1)}
+                onNextSequenceMatch={() => stepSequenceMatch(1)}
               />
               <SequenceViewer
                 ref={viewerRef}
@@ -1331,10 +2126,14 @@ export default function App() {
                 codonCells={codonCells}
                 variantItems={displayedVariantItems}
                 focusSpan={focusSpanDisplay}
+                emphasizedEdit={emphasizedEdit}
                 nearMask={derived.nearMask}
                 junctions={derived.junctions}
                 caret={caret}
                 selection={selection}
+                sequenceSearch={sequenceSearch}
+                searchMatches={sequenceMatches}
+                searchMatchIndex={sequenceMatchIndex}
                 selectedGuideId={selectedGuideId}
                 onCaretChange={setCaret}
                 onSelectionChange={setSelection}
@@ -1345,8 +2144,8 @@ export default function App() {
                 onOverviewExon={isCustomRegion ? undefined : snapToExon}
                 overviewDisabled={loading}
                 onKeyDown={handleKeyDown}
-                onExtendLeft={isCustomRegion ? null : () => extendRegion(-1)}
-                onExtendRight={isCustomRegion ? null : () => extendRegion(1)}
+                onExtendLeft={() => extendRegion(-1)}
+                onExtendRight={() => extendRegion(1)}
                 extensionDisabled={loading}
               />
             </div>
@@ -1357,6 +2156,8 @@ export default function App() {
               <GuideTable
                 guides={guideView.sorted}
                 hasEdits={derived.edits}
+                exploreMode={exploringGuides}
+                onExploreMode={toggleGuideExplore}
                 rs3Model={rs3Model}
                 onRs3Model={setRs3Model}
                 scorable={scorable}
@@ -1368,8 +2169,9 @@ export default function App() {
                 onToggleAll={toggleAll}
                 offAvailable={offTargets.available}
                 variantWarn={guideVariantWarn}
-                showOffTargets={!isCustomRegion}
+                showOffTargets
               />
+              {!exploringGuides && (
               <DonorPanel
                 donor={donor}
                 guide={selectedGuide}
@@ -1378,6 +2180,7 @@ export default function App() {
                 onArmLeft={(v) => setSelectedArm('left', v)}
                 onArmRight={(v) => setSelectedArm('right', v)}
                 onArmRatio={setSelectedArmRatio}
+                onArmTotal={setSelectedArmTotal}
                 armsCustomized={armsCustomized}
                 onApplyArmsToAll={applyArmsToAll}
                 orientation={orientation}
@@ -1387,14 +2190,16 @@ export default function App() {
                 scaffold={TRACR_RNAS[rs3Model].scaffold}
                 scaffoldLabel={TRACR_RNAS[rs3Model].label}
                 guideChecked={selectedGuide ? checked.has(selectedGuide.id) : false}
-                onAddToLibrary={() => selectedGuide && addChecked(selectedGuide.id)}
+                guideNeedsUpdate={selectedGuideNeedsLibraryUpdate}
+                onAddToLibrary={() => selectedGuide && addOrUpdateChecked(selectedGuide.id)}
                 libraryCount={guideView.sorted.filter((guide) => guide.metricsReady && checked.has(guide.id)).length}
                 onExport={exportGuides}
                 reference={region.reference}
               />
+              )}
             </aside>
           </div>
-        </>
+        </Suspense>
       )}
 
     </div>
@@ -1409,7 +2214,6 @@ function GettingStarted() {
         <p>Follow the workflow below to see how a precise-editing design moves from locus to export.</p>
       </header>
       <div className="tutorialstart">
-        <span className="tutorialarrow up" aria-hidden="true">↑</span>
         <span className="tutorialnumber">1</span>
         <div><h2>Input gene or locus</h2><p>Type a symbol, rsID, or coordinate above, or choose an example chip, then press Load.</p></div>
       </div>
@@ -1432,7 +2236,6 @@ function GettingStarted() {
           <div className="tutorialstep">
             <span className="tutorialnumber">3</span>
             <div><h3>Edit sequence here</h3><p>Select bases, type to insert, double-click a base to mutate it, or press Delete to remove it.</p></div>
-            <span className="tutorialarrow down" aria-hidden="true">↓</span>
           </div>
           <div className="mocksequence" aria-hidden="true">
             <div className="mocktrackrow mockdnarow">
@@ -1462,7 +2265,7 @@ function GettingStarted() {
           <div className="tutorialpanel">
             <div className="tutorialstep compact">
               <span className="tutorialnumber">4</span>
-              <div><h3>Select sgRNA</h3><p>Compare efficiency, distance, off-target matches, and re-cut prevention.</p></div>
+              <div><h3>Select sgRNA</h3><p>Compare efficiency, distance, off-target matches, and re-cut disruption.</p></div>
             </div>
             <div className="mockguides" aria-hidden="true"><i /><i /><i /></div>
           </div>
@@ -1477,7 +2280,6 @@ function GettingStarted() {
             <div className="tutorialstep compact">
               <span className="tutorialnumber">6</span>
               <div><h3>Export library of designs</h3><p>Check completed designs and export FASTA or TSV.</p></div>
-              <span className="tutorialarrow up-right" aria-hidden="true">↗</span>
             </div>
           </div>
         </aside>

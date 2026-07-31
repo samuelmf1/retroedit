@@ -6,10 +6,22 @@ const GNOMAD_MAF_STEPS = [
   { value: 1e-7, label: '0.00001%' },
   { value: 1e-6, label: '0.0001%' },
   { value: 1e-5, label: '0.001%' },
+  { value: 5e-5, label: '0.005%' },
   { value: 1e-4, label: '0.01%' },
+  { value: 5e-4, label: '0.05%' },
   { value: 1e-3, label: '0.1%' },
+  { value: 5e-3, label: '0.5%' },
   { value: 1e-2, label: '1%' },
+  { value: 5e-2, label: '5%' },
   { value: 1e-1, label: '10%' },
+  { value: 1.5e-1, label: '15%' },
+  { value: 2e-1, label: '20%' },
+  { value: 2.5e-1, label: '25%' },
+  { value: 3e-1, label: '30%' },
+  { value: 3.5e-1, label: '35%' },
+  { value: 4e-1, label: '40%' },
+  { value: 4.5e-1, label: '45%' },
+  { value: 5e-1, label: '50%' },
 ]
 
 function mafIndexFor(value) {
@@ -30,6 +42,7 @@ function Chip({ active, disabled, title, onClick, children }) {
     <button
       type="button"
       className={`frchip ${active ? 'on' : ''}`}
+      aria-pressed={active}
       disabled={disabled}
       title={title}
       onClick={onClick}
@@ -54,31 +67,35 @@ export function AnnotationControls({
   return (
     <div className={`frgroup annotationsgroup${className ? ` ${className}` : ''}`}>
       <span className="frlabel">Annotations</span>
-      <Chip active={opts.featureLevels.gene} onClick={() => setLevel('gene')}>Genes</Chip>
-      <Chip active={opts.featureLevels.transcript} onClick={() => setLevel('transcript')}>Transcripts</Chip>
-      {opts.featureLevels.transcript && (
-        <BiotypeMenu biotypes={biotypes} selected={opts.biotypes} onChange={(b) => onChange({ ...opts, biotypes: b })} />
-      )}
-      <Chip active={opts.gnomad} disabled={!gnomadOk}
-        title={gnomadOk ? 'Show or hide gnomAD population variants' : 'gnomAD annotations are unavailable for this genome'}
-        onClick={() => setTrack('gnomad')}>gnomAD</Chip>
-      {opts.gnomad && (
-        <label className="mafslider" title="Minimum gnomAD minor allele frequency shown; each step changes by 10×">
-          <span>MAF ≥</span>
-          <input type="range" min="0" max={GNOMAD_MAF_STEPS.length - 1} step="1"
-            value={mafIndex}
-            aria-label="Minimum gnomAD minor allele frequency"
-            onChange={(event) => onChange({ ...opts, gnomadMaf: GNOMAD_MAF_STEPS[Number(event.target.value)].value })} />
-          <output>{GNOMAD_MAF_STEPS[mafIndex].label}</output>
-        </label>
-      )}
-      <Chip active={opts.clinvar} disabled={!clinvarOk}
-        title={clinvarOk ? 'Show or hide ClinVar clinical annotations' : 'ClinVar annotations are unavailable for this genome'}
-        onClick={() => setTrack('clinvar')}>ClinVar</Chip>
-      {opts.clinvar && (
-        <ClinvarMenu selected={opts.clinvarSignificances}
-          onChange={(selected) => onChange({ ...opts, clinvarSignificances: selected })} />
-      )}
+      <div className="annotationsegment modelannotations" aria-label="Gene model annotations">
+        <Chip active={opts.featureLevels.gene} onClick={() => setLevel('gene')}>Genes</Chip>
+        <Chip active={opts.featureLevels.transcript} onClick={() => setLevel('transcript')}>Transcripts</Chip>
+        {opts.featureLevels.transcript && (
+          <BiotypeMenu biotypes={biotypes} selected={opts.biotypes} onChange={(b) => onChange({ ...opts, biotypes: b })} />
+        )}
+      </div>
+      <div className="annotationsegment variantannotations" aria-label="Variant annotations">
+        <Chip active={opts.gnomad} disabled={!gnomadOk}
+          title={gnomadOk ? 'Show or hide gnomAD population variants' : 'gnomAD annotations are unavailable for this genome'}
+          onClick={() => setTrack('gnomad')}>gnomAD</Chip>
+        {opts.gnomad && (
+          <label className="annotationsetting mafslider" title="Minimum gnomAD minor allele frequency shown; common-frequency thresholds advance in 5% increments">
+            <span>MAF</span>
+            <input type="range" min="0" max={GNOMAD_MAF_STEPS.length - 1} step="1"
+              value={mafIndex}
+              aria-label="Minimum gnomAD minor allele frequency"
+              onChange={(event) => onChange({ ...opts, gnomadMaf: GNOMAD_MAF_STEPS[Number(event.target.value)].value })} />
+            <output>≥ {GNOMAD_MAF_STEPS[mafIndex].label}</output>
+          </label>
+        )}
+        <Chip active={opts.clinvar} disabled={!clinvarOk}
+          title={clinvarOk ? 'Show or hide ClinVar clinical annotations' : 'ClinVar annotations are unavailable for this genome'}
+          onClick={() => setTrack('clinvar')}>ClinVar</Chip>
+        {opts.clinvar && (
+          <ClinvarMenu selected={opts.clinvarSignificances}
+            onChange={(selected) => onChange({ ...opts, clinvarSignificances: selected })} />
+        )}
+      </div>
     </div>
   )
 }
@@ -122,30 +139,30 @@ export default function FeatureRibbon({
             <strong>{locusOverview?.label}</strong>
           </div>
           {currentExon && (
-            <div className="exonnav" title={`${exonNav.gene.name} · canonical ${exonNav.transcript.name}`}>
+            <div className="exonnav" aria-label={`${exonNav.gene.name} canonical transcript navigation`}>
               <button type="button" className="frchip exonarrow exonpan"
-                disabled={navigationDisabled} title="Move left by one window (Q)"
-                aria-label="Move left by one window" onClick={onPanLeft}>←</button>
+                disabled={navigationDisabled} title="Slide backward"
+                aria-label="Slide backward" onClick={onPanLeft}>←</button>
               <button type="button" className="frchip exonarrow exonjump"
                 disabled={navigationDisabled || exonNav.index <= 0}
-                title="Jump to previous canonical exon (W)" aria-label="Jump to previous canonical exon"
+                title="Previous exon" aria-label="Previous exon"
                 onClick={onPreviousExon}>⇤</button>
               <button type="button" className="frchip exoncurrent" disabled={navigationDisabled}
-                title={`Snap to ${exonLabel} of canonical transcript ${exonNav.transcript.name}`}
+                title="Center current exon"
                 onClick={onSnapExon}>{exonLabel}</button>
               <button type="button" className="frchip exonarrow exonjump"
                 disabled={navigationDisabled || exonNav.index >= exonNav.exons.length - 1}
-                title="Jump to next canonical exon (S)" aria-label="Jump to next canonical exon"
+                title="Next exon" aria-label="Next exon"
                 onClick={onNextExon}>⇥</button>
               <button type="button" className="frchip exonarrow exonpan"
-                disabled={navigationDisabled} title="Move right by one window (D)"
-                aria-label="Move right by one window" onClick={onPanRight}>→</button>
+                disabled={navigationDisabled} title="Slide forward"
+                aria-label="Slide forward" onClick={onPanRight}>→</button>
             </div>
           )}
         </div>
         {locusOverview && (
           <div className="locusrange">
-            <strong>{Number(shownBp || 0).toLocaleString()} bp shown</strong>
+            <strong>{Number(shownBp || 0).toLocaleString()} bp window</strong>
             <span aria-hidden="true"> · </span>
             {formatChrom(locusOverview.chrom)}:{locusOverview.start.toLocaleString()}–{locusOverview.end.toLocaleString()}
           </div>
@@ -156,15 +173,28 @@ export default function FeatureRibbon({
   )
 }
 
+function useDismissMenu(open, setOpen, ref) {
+  useEffect(() => {
+    if (!open) return undefined
+    const onPointerDown = (event) => {
+      if (ref.current && !ref.current.contains(event.target)) setOpen(false)
+    }
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open, ref, setOpen])
+}
+
 function BiotypeMenu({ biotypes, selected, onChange }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
-  useEffect(() => {
-    if (!open) return
-    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false) }
-    document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
-  }, [open])
+  useDismissMenu(open, setOpen, ref)
 
   const isAll = selected == null
   const has = (b) => isAll || selected.has(b)
@@ -180,18 +210,22 @@ function BiotypeMenu({ biotypes, selected, onChange }) {
 
   return (
     <div className="biotypemenu" ref={ref}>
-      <button type="button" className="frchip" onClick={() => setOpen((o) => !o)}>
-        Biotypes ({isAll ? 'all' : `${count}/${biotypes.length}`}) ▾
+      <button type="button" className={`frchip filterchip${open ? ' open' : ''}${isAll ? '' : ' filtered'}`}
+        aria-expanded={open} aria-haspopup="menu" onClick={() => setOpen((value) => !value)}>
+        <span>Biotypes</span><b>{isAll ? 'All' : `${count}/${biotypes.length}`}</b><i aria-hidden="true">⌄</i>
       </button>
       {open && (
-        <div className="biotypepop">
-          <button type="button" className="btlink" onClick={() => onChange(null)}>select all</button>
-          <button type="button" className="btlink" onClick={() => onChange(new Set())}>none</button>
+        <div className="biotypepop" role="menu" aria-label="Transcript biotype filters">
+          <div className="filterpophead"><strong>Transcript biotypes</strong><span>{count} of {biotypes.length}</span></div>
+          <div className="filterlinks">
+            <button type="button" className="btlink" onClick={() => onChange(null)}>All</button>
+            <button type="button" className="btlink" onClick={() => onChange(new Set())}>None</button>
+          </div>
           <div className="btlist">
             {biotypes.map((b) => (
               <label key={b} className="btrow">
                 <input type="checkbox" checked={has(b)} onChange={() => toggle(b)} />
-                {b.replace(/_/g, ' ')}
+                <span>{b.replace(/_/g, ' ')}</span>
               </label>
             ))}
           </div>
@@ -207,14 +241,7 @@ function ClinvarMenu({ selected, onChange }) {
   const isAll = selected == null
   const count = isAll ? CLINVAR_CATEGORIES.length : selected.size
 
-  useEffect(() => {
-    if (!open) return undefined
-    const onDocument = (event) => {
-      if (ref.current && !ref.current.contains(event.target)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDocument)
-    return () => document.removeEventListener('mousedown', onDocument)
-  }, [open])
+  useDismissMenu(open, setOpen, ref)
 
   const toggle = (id) => {
     const next = new Set(isAll ? CLINVAR_CATEGORIES.map((category) => category.id) : selected)
@@ -225,12 +252,13 @@ function ClinvarMenu({ selected, onChange }) {
 
   return (
     <div className="biotypemenu clinvarmenu" ref={ref}>
-      <button type="button" className="frchip" aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}>
-        Significance ({isAll ? 'all' : `${count}/${CLINVAR_CATEGORIES.length}`}) ▾
+      <button type="button" className={`frchip filterchip${open ? ' open' : ''}${isAll ? '' : ' filtered'}`}
+        aria-expanded={open} aria-haspopup="menu" onClick={() => setOpen((value) => !value)}>
+        <span>Significance</span><b>{isAll ? 'All' : `${count}/${CLINVAR_CATEGORIES.length}`}</b><i aria-hidden="true">⌄</i>
       </button>
       {open && (
-        <div className="biotypepop clinvarpop">
+        <div className="biotypepop clinvarpop" role="menu" aria-label="ClinVar significance filters">
+          <div className="filterpophead"><strong>Clinical significance</strong><span>{count} of {CLINVAR_CATEGORIES.length}</span></div>
           <div className="filterlinks">
             <button type="button" className="btlink" onClick={() => onChange(null)}>All</button>
             <button type="button" className="btlink" onClick={() => onChange(new Set())}>None</button>
@@ -238,8 +266,8 @@ function ClinvarMenu({ selected, onChange }) {
           <div className="btlist">
             {CLINVAR_CATEGORIES.map((category) => (
               <label className="btrow" key={category.id}>
-                <input type="checkbox" checked={isAll || selected.has(category.id)}
-                  onChange={() => toggle(category.id)} />
+                <input type="checkbox" checked={isAll || selected.has(category.id)} onChange={() => toggle(category.id)} />
+                <i className={`filterdot clin-${category.id}`} aria-hidden="true" />
                 <span>{category.label}</span>
               </label>
             ))}
