@@ -47,7 +47,11 @@ const DEFAULT_VIEW_OPTS = {
   clinvar: false,
 }
 const MAF_WARN = 0.01 // polymorphism threshold that can impair a guide
+const RSID_DEFAULT_GNOMAD_MAF = 0.01
 const POSITION_VIEW_BP = 700
+const DEFAULT_OVERVIEW_HALF_SPAN = 100_000
+const MIN_OVERVIEW_HALF_SPAN = 1_000
+const MAX_OVERVIEW_HALF_SPAN = 5_000_000
 const EXON_CONTEXT_BP = 200
 const EXTEND_BP = 200
 const CUSTOM_GENOME_ID = 'custom-upload'
@@ -244,6 +248,7 @@ export default function App() {
   const [offTargets, setOffTargets] = useState({ available: false, byGuide: {}, loading: false, pendingIds: new Set() })
   const [exonNav, setExonNav] = useState(null)
   const [nearbyFeatures, setNearbyFeatures] = useState([])
+  const [overviewHalfSpan, setOverviewHalfSpan] = useState(DEFAULT_OVERVIEW_HALF_SPAN)
   const [customUpload, setCustomUpload] = useState(null)
   const [customUploadProgress, setCustomUploadProgress] = useState(null)
   const [pendingDraft, setPendingDraft] = useState(null)
@@ -461,6 +466,7 @@ export default function App() {
       // A newer search may finish first. Never let this older response replace it.
       if (requestId !== loadRequestRef.current) return null
       if (!opts.preserveLoadState) {
+        setOverviewHalfSpan(DEFAULT_OVERVIEW_HALF_SPAN)
         setSequenceSearch('')
         setSequenceMatchIndex(0)
         if (gid !== CUSTOM_GENOME_ID) {
@@ -481,6 +487,9 @@ export default function App() {
         if (opts.historyMode !== 'none' && gid !== CUSTOM_GENOME_ID) {
           writeLocationState({ genomeId: gid, query: q, pam: selectedPam }, opts.historyMode)
         }
+      }
+      if (/^rs\d+$/i.test(q.trim()) && !opts.preserveAnnotationState) {
+        setViewOpts((current) => ({ ...current, gnomad: true, gnomadMaf: RSID_DEFAULT_GNOMAD_MAF }))
       }
       setRegion(result)
       setEdited(makeEdited(result.reference.seq))
@@ -762,9 +771,73 @@ export default function App() {
     if (!gene || loading) return
     const geneQuery = gene.name || gene.id
     if (!geneQuery) return
+
+    const loadedQuery = loadedControls?.query?.trim() ?? query.trim()
+    const focus = region?.focus
+    const variantPosition = focus ? Math.round((focus.start + focus.end) / 2) : null
+    const viewingVariant = /^rs\d+$/i.test(loadedQuery) && Number.isFinite(variantPosition)
+    const overlapsVariant = viewingVariant && gene.start <= focus.end && gene.end >= focus.start
+
+    if (viewingVariant && overlapsVariant) {
+      const reference = region.reference
+      const data = await fetchCanonicalExons({
+        assembly: reference.assembly,
+        gene: gene.id || geneQuery,
+      }).catch(() => null)
+      const geneContext = data?.exons?.length
+        ? { ...data.gene, canonical: data.transcript.id }
+        : gene
+      const width = reference.end - reference.start + 1
+      const start = Math.max(1, variantPosition - Math.floor((width - 1) / 2))
+      setQuery(loadedQuery)
+      const result = await doLoad({
+        skipLoadConfirmation: true,
+        preserveExonNav: true,
+        preserveAnnotationState: true,
+        query: loadedQuery,
+        geneContext,
+        locus: {
+          chrom: reference.chrom,
+          start,
+          end: start + width - 1,
+          focus: { start: variantPosition, end: variantPosition },
+          gene: geneContext,
+          label: `${geneContext.name || geneQuery} (${geneContext.id || gene.id})`,
+        },
+      })
+      if (result && data?.exons?.length) {
+        let index = 0
+        let distance = Infinity
+        data.exons.forEach((exon, exonIndex) => {
+          const candidate = variantPosition < exon.start
+            ? exon.start - variantPosition
+            : variantPosition > exon.end ? variantPosition - exon.end : 0
+          if (candidate < distance) { distance = candidate; index = exonIndex }
+        })
+        setExonNav({ ...data, index })
+      }
+      return
+    }
+
     setQuery(geneQuery)
     await doLoad({ query: geneQuery })
-  }, [doLoad, loading])
+  }, [doLoad, loadedControls, loading, query, region])
+  const offTargetLocusHref = useCallback((hit) => {
+    if (!region || !hit) return null
+    const targetStart = Number(hit.pos)
+    if (!Number.isFinite(targetStart)) return null
+    const targetEnd = targetStart + 19
+    const chrom = String(hit.chrom || "").replace(/^chr/i, "")
+    if (!chrom) return null
+    const locusQuery = `chr${chrom}:${targetStart}-${targetEnd}`
+    const url = new URL(window.location.href)
+    url.search = ""
+    url.searchParams.set("genome", region.reference.genomeId || genomeId)
+    url.searchParams.set("q", locusQuery)
+    if (pam !== DEFAULT_PAM) url.searchParams.set("pam", pam)
+    return url.href
+  }, [genomeId, pam, region])
+
 
   const resizeOverview = useCallback(async (requestedStart, requestedEnd) => {
     if (!region || loading || !Number.isFinite(requestedStart) || !Number.isFinite(requestedEnd)) return
@@ -1082,6 +1155,8 @@ export default function App() {
         offtarget,
         blocking,
         offUnique: offtarget ? offtarget.unique : undefined,
+        chrom: region.reference.chrom,
+        protoGenomic: region.reference.start + g.protoStart,
         cutGenomic: region.reference.start + g.cutBefore,
         protoDS, protoDE, pamDS, pamDE, cutDS,
         ds: Math.min(protoDS, pamDS),
@@ -1133,16 +1208,17 @@ export default function App() {
       .sort((a, b) => a.start - b.start)
     const functional = []
 
-    const addSegment = (level, name, start, end, exon) => {
+    const addSegment = (level, portion, start, end, exon, exonIndex) => {
       const display = toDisplay(start, end)
       if (!display) return
+      const exonNumber = exon.rank ?? exonIndex + 1
       functional.push({
         id: `${level}-${nav.transcript.id}-${start}-${end}`,
         level,
-        name,
+        name: level === 'utr' ? portion : `Exon ${exonNumber} · ${portion}`,
         ...display,
         strand: nav.transcript.strand,
-        source: `canonical ${nav.transcript.name} · exon ${exon.rank ?? ''}`,
+        source: `canonical ${nav.transcript.name} · exon ${exonNumber}`,
       })
     }
     const utrName = (exon, side) => {
@@ -1154,12 +1230,12 @@ export default function App() {
       return 'non-coding exon'
     }
 
-    nav.exons.filter((exon) => exon.end >= refStart && exon.start <= refEnd).forEach((exon) => {
+    nav.exons.filter((exon) => exon.end >= refStart && exon.start <= refEnd).forEach((exon, exonIndex) => {
       const exonStart = Math.max(exon.start, refStart)
       const exonEnd = Math.min(exon.end, refEnd)
       const exonCoding = coding.filter((segment) => segment.end >= exonStart && segment.start <= exonEnd)
       if (!exonCoding.length) {
-        addSegment('utr', utrName(exon), exonStart, exonEnd, exon)
+        addSegment('utr', utrName(exon), exonStart, exonEnd, exon, exonIndex)
         return
       }
       let cursor = exonStart
@@ -1167,12 +1243,12 @@ export default function App() {
         const start = Math.max(exonStart, segment.start)
         const end = Math.min(exonEnd, segment.end)
         if (start > cursor) {
-          addSegment('utr', utrName(exon, index === 0 ? 'before' : null), cursor, start - 1, exon)
+          addSegment('utr', utrName(exon, index === 0 ? 'before' : null), cursor, start - 1, exon, exonIndex)
         }
-        addSegment('cds', 'CDS', start, end, exon)
+        addSegment('cds', 'CDS', start, end, exon, exonIndex)
         cursor = Math.max(cursor, end + 1)
       })
-      if (cursor <= exonEnd) addSegment('utr', utrName(exon, 'after'), cursor, exonEnd, exon)
+      if (cursor <= exonEnd) addSegment('utr', utrName(exon, 'after'), cursor, exonEnd, exon, exonIndex)
     })
     return [...items, ...functional]
   }, [region, derived, refSeq, viewOpts, exonNav])
@@ -1186,14 +1262,19 @@ export default function App() {
     }
     const center = Math.round((focus.start + focus.end) / 2)
     const controller = new AbortController()
-    fetchNearbyFeatures({
-      assembly: reference.assembly,
-      chrom: reference.chrom,
-      start: Math.max(1, center - 100_000),
-      end: center + 100_000,
-    }, controller.signal).then(setNearbyFeatures).catch(() => {})
-    return () => controller.abort()
-  }, [region?.reference.assembly, region?.reference.chrom, region?.reference.gene, region?.focus?.start, region?.focus?.end])
+    const timer = window.setTimeout(() => {
+      fetchNearbyFeatures({
+        assembly: reference.assembly,
+        chrom: reference.chrom,
+        start: Math.max(1, center - overviewHalfSpan),
+        end: center + overviewHalfSpan,
+      }, controller.signal).then(setNearbyFeatures).catch(() => {})
+    }, 120)
+    return () => {
+      window.clearTimeout(timer)
+      controller.abort()
+    }
+  }, [region?.reference.assembly, region?.reference.chrom, region?.reference.gene, region?.focus?.start, region?.focus?.end, overviewHalfSpan])
 
   const locusOverview = useMemo(() => {
     if (isCustomRegion) return null
@@ -1213,15 +1294,25 @@ export default function App() {
     const focus = region.focus
     if (!focus) return null
     const center = Math.round((focus.start + focus.end) / 2)
+    const spanLabel = overviewHalfSpan >= 1_000_000
+      ? `${Number((overviewHalfSpan / 1_000_000).toFixed(2))} Mb`
+      : `${Number((overviewHalfSpan / 1_000).toFixed(1))} kb`
     return {
       chrom: region.reference.chrom,
-      start: Math.max(1, center - 100_000),
-      end: center + 100_000,
-      label: `chr${String(region.reference.chrom).replace(/^chr/i, '')}:${center.toLocaleString()} ±100 kb`,
+      start: Math.max(1, center - overviewHalfSpan),
+      end: center + overviewHalfSpan,
+      label: `chr${String(region.reference.chrom).replace(/^chr/i, '')}:${center.toLocaleString()} ±${spanLabel}`,
       exons: [],
       elements: nearbyFeatures,
     }
-  }, [region, exonNav, nearbyFeatures])
+  }, [region, exonNav, nearbyFeatures, overviewHalfSpan])
+
+  const zoomNearbyOverview = useCallback((factor) => {
+    setOverviewHalfSpan((current) => Math.max(
+      MIN_OVERVIEW_HALF_SPAN,
+      Math.min(MAX_OVERVIEW_HALF_SPAN, Math.round(current * factor)),
+    ))
+  }, [])
 
   // Codon / amino-acid consequences mapped onto displayed sequence columns.
   const codonCells = useMemo(() => {
@@ -1246,6 +1337,37 @@ export default function App() {
       recordByRef[rec.ref] = rec
       if (track.pos[rec.ref] >= 0) parity[d] = track.parity[rec.ref]
     }
+    const deletionSpans = []
+    const largeDeletionMask = new Uint8Array(edited.length)
+    for (let d = 0; d < edited.length;) {
+      const record = edited[d]
+      if (!record.del || record.ref == null || track.pos[record.ref] < 0) { d += 1; continue }
+      let end = d + 1
+      while (end < edited.length) {
+        const next = edited[end]
+        if (!next.del || next.ref == null || track.pos[next.ref] < 0) break
+        end += 1
+      }
+      const codingBases = end - d
+      if (codingBases >= 6) {
+        for (let i = d; i < end; i++) largeDeletionMask[i] = 1
+        const inFrame = codingBases % 3 === 0
+        const firstRef = edited[d].ref
+        const lastRef = edited[end - 1].ref
+        const genomicStart = region.reference.start + Math.min(firstRef, lastRef)
+        const genomicEnd = region.reference.start + Math.max(firstRef, lastRef)
+        const consequence = inFrame
+          ? `in-frame deletion of ${codingBases / 3} amino acids`
+          : `frameshift caused by a ${codingBases} bp coding deletion`
+        deletionSpans.push({
+          ds: d, de: end - 1, inFrame,
+          label: inFrame ? `Δ ${codingBases / 3} aa` : `Frameshift · ${codingBases} bp`,
+          title: `${frameLabel ? `${frameLabel} · ` : ''}${consequence} · chr${region.reference.chrom}:${genomicStart.toLocaleString()}–${genomicEnd.toLocaleString()}`,
+        })
+      }
+      d = end
+    }
+
 
     for (let r = 0; r < refSeq.length; r++) {
       if (track.pos[r] !== 1) continue
@@ -1256,9 +1378,14 @@ export default function App() {
       let effectTitle
 
       if (records.some((rec) => !rec || rec.del)) {
-        aa[middleDisplay] = 'Δ'
-        kind[middleDisplay] = 'indel'
-        effectTitle = `${codon.codon} (${codon.aa ?? 'X'}) → deletion; coding frame may change`
+        const consolidated = codon.refIdx.some((idx) => largeDeletionMask[derived.dispStart[idx]])
+        if (!consolidated) {
+          aa[middleDisplay] = 'Δ'
+          kind[middleDisplay] = 'indel'
+        }
+        effectTitle = consolidated
+          ? `${codon.codon} (${codon.aa ?? 'X'}) · included in consolidated coding deletion`
+          : `${codon.codon} (${codon.aa ?? 'X'}) → deletion; coding frame may change`
       } else {
         const bases = records.map((rec) => rec.base)
         const editedCodon = frame.strand === 1
@@ -1306,7 +1433,7 @@ export default function App() {
       d = end
     }
 
-    return { parity, aa, changed, title, kind }
+    return { parity, aa, changed, title, kind, deletionSpans, largeDeletionMask }
   }, [region, derived, refSeq, edited, frame])
 
   // Always fetch gnomAD after an edit so common variants can flag affected
@@ -2141,6 +2268,7 @@ export default function App() {
                 onOverviewNavigate={isCustomRegion ? undefined : navigateOverview}
                 onOverviewGene={isCustomRegion ? undefined : navigateToOverviewGene}
                 onOverviewResize={isCustomRegion ? undefined : resizeOverview}
+                onOverviewZoom={isCustomRegion ? undefined : zoomNearbyOverview}
                 onOverviewExon={isCustomRegion ? undefined : snapToExon}
                 overviewDisabled={loading}
                 onKeyDown={handleKeyDown}
@@ -2169,7 +2297,9 @@ export default function App() {
                 onToggleAll={toggleAll}
                 offAvailable={offTargets.available}
                 variantWarn={guideVariantWarn}
+                assembly={region.reference.assembly}
                 showOffTargets
+                getOffTargetHref={offTargetLocusHref}
               />
               {!exploringGuides && (
               <DonorPanel
@@ -2255,7 +2385,7 @@ function GettingStarted() {
             </div>
             <div className="mockannotations">
               <div className="mockannotationlane"><b>Gene</b><span className="mockgene">GENE</span></div>
-              <div className="mockannotationlane"><b>CDS / UTR</b><span className="mockutr">5′ UTR</span><span className="mockcds">CDS</span></div>
+              <div className="mockannotationlane"><b>Exon composition</b><span className="mockutr">5′ UTR</span><span className="mockcds">Exon 1 · CDS</span></div>
               <div className="mockannotationlane"><b>Transcript ★</b><span className="mocktranscript"><i /><i /><i /></span></div>
             </div>
           </div>
@@ -2279,7 +2409,7 @@ function GettingStarted() {
           <div className="tutorialpanel export">
             <div className="tutorialstep compact">
               <span className="tutorialnumber">6</span>
-              <div><h3>Export library of designs</h3><p>Check completed designs and export FASTA or TSV.</p></div>
+              <div><h3>Export designs</h3><p>Check completed designs and export FASTA or TSV.</p></div>
             </div>
           </div>
         </aside>

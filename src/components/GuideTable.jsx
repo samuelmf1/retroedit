@@ -2,19 +2,124 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 const LIBRARY_REMINDER_KEY = 'retroedit:skip-library-review-reminder'
 
+function chromosomeRank(value) {
+  const token = String(value || "").replace(/^chr/i, "").toUpperCase()
+  if (/^\d+$/.test(token)) return Number(token)
+  if (token === "X") return 23
+  if (token === "Y") return 24
+  if (token === "M" || token === "MT") return 25
+  return 1_000
+}
+
+const HUMAN_CHROMOSOMES = [...Array.from({ length: 22 }, (_, index) => String(index + 1)), "X", "Y"]
+const HUMAN_CHROMOSOME_LENGTHS = {
+  GRCh38: [248956422, 242193529, 198295559, 190214555, 181538259, 170805979, 159345973, 145138636, 138394717, 133797422, 135086622, 133275309, 114364328, 107043718, 101991189, 90338345, 83257441, 80373285, 58617616, 64444167, 46709983, 50818468, 156040895, 57227415, 16569],
+  GRCh37: [249250621, 243199373, 198022430, 191154276, 180915260, 171115067, 159138663, 146364022, 141213431, 135534747, 135006516, 133851895, 115169878, 107349540, 102531392, 90354753, 81195210, 78077248, 59128983, 63025520, 48129895, 51304566, 155270560, 59373566, 16571],
+}
+
+function normalizeChromosome(value) {
+  const token = String(value || "").replace(/^chr/i, "").toUpperCase()
+  return token === "MT" ? "M" : token
+}
+
+function offTargetHitKey(hit) {
+  return [normalizeChromosome(hit.chrom), Number(hit.pos), hit.strand || "+"].join(":")
+}
+
+function OffTargetChromosomeMap({ assembly, queryChrom, queryPosition, hits, onQuery, onHit }) {
+  const lengths = HUMAN_CHROMOSOME_LENGTHS[assembly] || HUMAN_CHROMOSOME_LENGTHS.GRCh38
+  const queryToken = normalizeChromosome(queryChrom)
+  const maxLength = Math.max(...lengths.slice(0, 24))
+  return (
+    <section className="offtargetchromosomes" aria-label="Chromosome locations of query and off-target matches">
+      <header>
+        <strong>Genomic distribution</strong>
+        <span><i className="query" /> query guide <i className="hit mm0" /> 0 MM <i className="hit mm1" /> 1 MM <i className="hit mm2" /> 2 MM</span>
+      </header>
+      <div className="offtargetchromosomeviewport">
+        <div className="offtargetchromosomegrid">
+          {HUMAN_CHROMOSOMES.map((chromosome, chromosomeIndex) => {
+            const length = lengths[chromosomeIndex]
+            const chromosomeHits = hits.filter((hit) => normalizeChromosome(hit.chrom) === chromosome)
+            const queryHere = queryToken === chromosome && Number.isFinite(queryPosition)
+            const bodyHeight = Math.max(14, Math.round((length / maxLength) * 48))
+            return (
+              <div className="offtargetchromosome" key={chromosome}>
+                <div className="offtargetchromosomebody" style={{ height: bodyHeight }}>
+                  {queryHere && (
+                    <button type="button" className="offtargetchromosomemarker query"
+                      style={{ top: Math.max(2, Math.min(98, (queryPosition / length) * 100)) + "%" }}
+                      aria-label={"Query guide on chromosome " + chromosome + "; return to query summary"}
+                      title={"Query guide · chr" + chromosome + ":" + queryPosition.toLocaleString()}
+                      onClick={onQuery} />
+                  )}
+                  {chromosomeHits.map((hit, hitIndex) => {
+                    const position = Number(hit.pos)
+                    const key = offTargetHitKey(hit)
+                    return (
+                      <button type="button" className={`offtargetchromosomemarker hit mm${Math.min(2, Number(hit.mm) || 0)}`}
+                        key={key + ":" + hitIndex}
+                        style={{ top: Math.max(2, Math.min(98, (position / length) * 100)) + "%" }}
+                        aria-label={"Off-target on chromosome " + chromosome + " with " + hit.mm + " mismatches; scroll to alignment"}
+                        title={"chr" + chromosome + ":" + position.toLocaleString() + " · " + hit.mm + " MM"}
+                        onClick={() => onHit(key)} />
+                    )
+                  })}
+                </div>
+                <span>{chromosome}</span>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </section>
+  )
+}
+function MiniOffTargetGeneView({ overview, targetStart, targetEnd }) {
+  if (!overview || !Number.isFinite(targetStart)) return null
+  const rawStart = Math.min(Number(overview.start), targetStart)
+  const rawEnd = Math.max(Number(overview.end), targetEnd)
+  const padding = Math.max(1, Math.round((rawEnd - rawStart + 1) * 0.06))
+  const start = Math.max(1, rawStart - padding)
+  const end = rawEnd + padding
+  const span = Math.max(1, end - start + 1)
+  const segment = (segmentStart, segmentEnd, minWidth = 0) => {
+    const left = Math.max(0, Math.min(100, ((segmentStart - start) / span) * 100))
+    const right = Math.max(left, Math.min(100, ((segmentEnd - start + 1) / span) * 100))
+    return { left: `${left}%`, width: `max(${minWidth}px, ${right - left}%)` }
+  }
+  return (
+    <div className="offtargetminigene" aria-label={`${overview.name} gene context; off-target at ${targetStart} to ${targetEnd}`}>
+      <span><b>{overview.name}</b><small>{overview.strand === -1 ? "− strand ←" : "+ strand →"}</small></span>
+      <div className="offtargetminigenetrack" aria-hidden="true">
+        <i style={segment(Number(overview.start), Number(overview.end))} />
+        {(overview.exons ?? []).map((exon, index) => (
+          <b key={`${exon.start}:${exon.end}:${index}`} style={segment(Number(exon.start), Number(exon.end), 4)} />
+        ))}
+        <em style={segment(targetStart, targetEnd, 5)} />
+      </div>
+    </div>
+  )
+}
+
+
 export default function GuideTable({
   guides, hasEdits, exploreMode, onExploreMode, scorable, rs3Available, rs3Model, onRs3Model,
-  selectedGuideId, onSelect, checked, onToggle, onToggleAll, offAvailable, variantWarn,
+  selectedGuideId, onSelect, checked, onToggle, onToggleAll, offAvailable, variantWarn, assembly, getOffTargetHref,
   showOffTargets = true,
 }) {
   const [sort, setSort] = useState(null)
   const [libraryPrompt, setLibraryPrompt] = useState(null)
+  const [offTargetDialog, setOffTargetDialog] = useState(null)
+  const [focusedOffTargetKey, setFocusedOffTargetKey] = useState(null)
   const [skipLibraryReminder, setSkipLibraryReminder] = useState(false)
   const [libraryReminderDisabled, setLibraryReminderDisabled] = useState(() => (
     window.sessionStorage.getItem(LIBRARY_REMINDER_KEY) === '1'
   ))
   const libraryPromptButtonRef = useRef(null)
   const selectedRowRef = useRef(null)
+  const offTargetQueryRef = useRef(null)
+  const offTargetRowRefs = useRef(new Map())
   const visibleGuides = useMemo(() => sortGuides(guides, sort), [guides, sort])
   const selectedRowIndex = useMemo(
     () => visibleGuides.findIndex((guide) => guide.id === selectedGuideId),
@@ -100,6 +205,51 @@ export default function GuideTable({
       window.removeEventListener('keydown', onKeyDown)
     }
   }, [libraryPrompt])
+
+  useEffect(() => {
+    if (!offTargetDialog) return undefined
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setOffTargetDialog(null)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [offTargetDialog])
+
+  useEffect(() => {
+    if (!focusedOffTargetKey) return undefined
+    const timer = window.setTimeout(() => setFocusedOffTargetKey(null), 1400)
+    return () => window.clearTimeout(timer)
+  }, [focusedOffTargetKey])
+
+  const queryTargetStart = Number(offTargetDialog?.protoGenomic)
+  const queryTargetChromRaw = String(offTargetDialog?.chrom || "")
+  const queryTargetChrom = queryTargetChromRaw
+    ? (/^chr/i.test(queryTargetChromRaw) ? queryTargetChromRaw : "chr" + queryTargetChromRaw)
+    : ""
+  const queryTargetLocus = Number.isFinite(queryTargetStart) && queryTargetChrom
+    ? queryTargetChrom + ":" + queryTargetStart.toLocaleString() + "–" + (queryTargetStart + 19).toLocaleString()
+    : null
+  const queryChromRank = chromosomeRank(queryTargetChromRaw)
+  const orderedOffTargetHits = [...(offTargetDialog?.offtarget.top ?? [])].sort((left, right) => {
+    const mismatchDifference = Number(left.mm ?? 0) - Number(right.mm ?? 0)
+    if (mismatchDifference) return mismatchDifference
+    const chromosomeDifference = Math.abs(chromosomeRank(left.chrom) - queryChromRank) -
+      Math.abs(chromosomeRank(right.chrom) - queryChromRank)
+    if (chromosomeDifference) return chromosomeDifference
+    const leftPosition = Number(left.pos ?? 0)
+    const rightPosition = Number(right.pos ?? 0)
+    const positionDifference = Math.abs(leftPosition - queryTargetStart) - Math.abs(rightPosition - queryTargetStart)
+    return positionDifference || leftPosition - rightPosition
+  })
+  const focusOffTargetResult = (key) => {
+    const target = offTargetRowRefs.current.get(key)
+    if (!target) return
+    setFocusedOffTargetKey(key)
+    target.scrollIntoView({ behavior: "smooth", block: "center" })
+  }
+  const focusQueryTarget = () => {
+    offTargetQueryRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+  }
 
   return (
     <>
@@ -230,7 +380,7 @@ export default function GuideTable({
                     {g.synthesisHomopolymer && (
                       <><br /><span
                         className="flag synthesis"
-                        title={`${g.synthesisHomopolymer}: Runs of five or more A, C, or G bases may increase oligonucleotide synthesis or sequence-verification errors.`}
+                        title={`${g.synthesisHomopolymer}: Runs of five or more identical bases may increase oligonucleotide synthesis or sequence-verification errors.`}
                       >
                         Homopolymer synthesis risk
                       </span></>
@@ -246,7 +396,7 @@ export default function GuideTable({
                   <td className="num">{scoreCell(g, 'rs3Chen', 'Chen2013', scorable, rs3Available)}</td>
                   <td className="num" title={`${Math.round(g.gc * 100)}% GC in the spacer (PAM excluded)`}>{Math.round(g.gc * 100)}</td>
                   {!exploreMode && <td className="num" title={`${g.cutDist} bp from the predicted Cas9 cut to the nearest intended edit`}>{g.cutDist}</td>}
-                  {showOffTargets && <td className="num">{offCell(g, offAvailable)}</td>}
+                  {showOffTargets && <td className="num">{offCell(g, offAvailable, setOffTargetDialog)}</td>}
                   {!exploreMode && <td>{blockCell(g)}</td>}
                 </tr>
               ))}
@@ -255,6 +405,129 @@ export default function GuideTable({
         </div>
       )}
     </section>
+      {offTargetDialog && (
+        <div className="spacermatchbackdrop" role="presentation"
+          onMouseDown={(event) => { if (event.target === event.currentTarget) setOffTargetDialog(null) }}>
+          <section className="spacermatchmodal offtargetmodal" role="dialog" aria-modal="true"
+            aria-labelledby="offtarget-dialog-title">
+            <header>
+              <div className="offtargetheadercopy">
+                <h2 id="offtarget-dialog-title">Potential off-target matches</h2>
+                <div className="offtargetquerysummary" ref={offTargetQueryRef}>
+                  <div className="offtargetquerycontext">
+                    <span>Query guide</span>
+                    {queryTargetLocus && <strong>{queryTargetLocus}</strong>}
+                    <small>{offTargetDialog.strand} strand · 20-nt spacer coordinates</small>
+                  </div>
+                  <div className="offtargetquerydetails">
+                    <code className="offtargetqueryspacer">{offTargetDialog.spacer}</code>
+                    <span className="offtargetquerypam"><small>PAM</small><b>{offTargetDialog.pamSeq}</b></span>
+                    <span className="offtargetquerycounts" aria-label="Genome-wide mismatch counts">
+                      {["0", "1", "2"].map((mm) => (
+                        <span key={mm} className={`mm${mm}`}><small>{mm} MM</small><b>{offTargetDialog.offtarget.counts?.[mm] ?? 0}</b></span>
+                      ))}
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <button type="button" className="spacermatchclose" aria-label="Close off-target details"
+                onClick={() => setOffTargetDialog(null)}>×</button>
+            </header>
+            <OffTargetChromosomeMap
+              assembly={assembly}
+              queryChrom={queryTargetChromRaw}
+              queryPosition={queryTargetStart}
+              hits={orderedOffTargetHits}
+              onQuery={focusQueryTarget}
+              onHit={focusOffTargetResult}
+            />
+            <p className="offtargetnote">
+              Genomic matches other than the intended target, ordered by mismatch count and then proximity to the query target.
+              {(offTargetDialog.offtarget.top?.length ?? 0) >= 20 && ' Showing the first 20 retained matches.'}
+            </p>
+            <div className="offtargetmatchlist" role="list" aria-label="Potential off-target genomic matches">
+              {orderedOffTargetHits.map((hit) => {
+                const chrom = String(hit.chrom).replace(/^chr/i, '')
+                const start = Number(hit.pos)
+                const gene = hit.nearestGene
+                const annotation = hit.annotation
+                const querySequence = String(offTargetDialog.spacer || "").toUpperCase()
+                const matchSequence = String(hit.sequence || "").toUpperCase()
+                const hasAlignment = querySequence.length === 20 && matchSequence.length === 20
+                const hitKey = offTargetHitKey(hit)
+                return (
+                  <article role="listitem" key={hitKey}
+                    ref={(node) => {
+                      if (node) offTargetRowRefs.current.set(hitKey, node)
+                      else offTargetRowRefs.current.delete(hitKey)
+                    }}
+                    className={focusedOffTargetKey === hitKey ? "located" : ""}>
+                    <span className={`offtargetmmbadge mm${Math.min(2, Number(hit.mm) || 0)}`}>
+                      {hit.mm} MM
+                    </span>
+                    <span className="offtargetlocus">
+                      <strong>chr{chrom}:{start.toLocaleString()}–{(start + 19).toLocaleString()}</strong>
+                      <small>{hit.strand} strand · PAM <code>{hit.pam}</code></small>
+                    </span>
+                    <span className="offtargetgene">
+                      {gene ? <><strong title={gene.id}>{gene.name}</strong><small>{gene.distance === 0
+                        ? "within gene"
+                        : `${Number(gene.distance).toLocaleString()} bp away`}</small></> : <small>No nearby gene annotation</small>}
+                      {annotation && (
+                        <span className="offtargetannotations">
+                          {annotation.region && annotation.region !== "genic" && (
+                            <b className={`region ${annotation.region.toLowerCase()}`}>{annotation.region}</b>
+                          )}
+                          {(annotation.exons ?? []).map((rank) => <b key={rank}>Exon {rank}</b>)}
+                          {(annotation.spliceSites ?? []).map((site) => <b key={site} className="splice">Splice {site}</b>)}
+                          {annotation.transcript && (
+                            <em title={annotation.transcriptId}>{annotation.transcript}{annotation.canonical ? " ★" : ""}</em>
+                          )}
+                        </span>
+                      )}
+                      {getOffTargetHref?.(hit) && (
+                        <a className="offtargetopenlocus" href={getOffTargetHref(hit)} target="_blank" rel="noopener noreferrer">
+                          Open locus in new tab <span aria-hidden="true">↗</span>
+                        </a>
+                      )}
+                    </span>
+                    {hasAlignment && (
+                      <div className="offtargetalignment" aria-label={`Query ${querySequence} PAM ${offTargetDialog.pamSeq}; genomic match ${matchSequence} PAM ${hit.pam}`}>
+                        <div className="offtargetalignmentseq">
+                          <span>Query</span>
+                          <code>{[...querySequence].map((base, baseIndex) => (
+                            <i key={baseIndex}>{base}</i>
+                          ))}{[...String(offTargetDialog.pamSeq || "")].map((base, pamIndex) => (
+                            <i key={"pam-" + pamIndex} className={`pam${pamIndex === 0 ? " pamstart" : ""}`}>{base}</i>
+                          ))}</code>
+                          <span aria-hidden="true" />
+                          <code className="offtargetmatchmarks" aria-hidden="true">
+                            {[...querySequence].map((base, baseIndex) => (
+                              <i key={baseIndex} className={base === matchSequence[baseIndex] ? "" : "mismatch"}>
+                                {base === matchSequence[baseIndex] ? "│" : "•"}
+                              </i>
+                            ))}
+                          </code>
+                          <span>Match</span>
+                          <code>{[...matchSequence].map((base, baseIndex) => (
+                            <i key={baseIndex} className={base === querySequence[baseIndex] ? "" : "mismatch"}>{base}</i>
+                          ))}{[...String(hit.pam || "")].map((base, pamIndex) => (
+                            <i key={"pam-" + pamIndex} className={`pam${pamIndex === 0 ? " pamstart" : ""}`}>{base}</i>
+                          ))}</code>
+                        </div>
+                        <MiniOffTargetGeneView overview={annotation?.overview} targetStart={start} targetEnd={start + 19} />
+                      </div>
+                    )}
+                  </article>
+                )
+              })}
+              {!offTargetDialog.offtarget.top?.length && (
+                <p className="empty">Detailed off-target coordinates are unavailable for this result.</p>
+              )}
+            </div>
+          </section>
+        </div>
+      )}
       {libraryPrompt && (
         <div className="spacermatchbackdrop libraryreviewbackdrop" role="presentation"
           onMouseDown={(event) => { if (event.target === event.currentTarget) closeLibraryPrompt() }}>
@@ -393,7 +666,7 @@ function variantWarnTitle(w) {
     `Cells carrying an alternate allele may have reduced sgRNA annealing or cutting.\n${details}${more}`
 }
 
-function offCell(g, offAvailable) {
+function offCell(g, offAvailable, onOpen) {
   if (!offAvailable) return <span className="muted" title="off-target index not built in this environment">off</span>
   const ot = g.offtarget
   if (!ot) return <span className="muted">…</span>
@@ -404,7 +677,18 @@ function offCell(g, offAvailable) {
     ? 'Unique in the genome (1·0·0)'
     : `Not unique — genomic matches 0mm: ${c['0'] ?? 0}, 1mm: ${c['1'] ?? 0}, 2mm: ${c['2'] ?? 0}.` +
       ((c['0'] ?? 0) > 1 ? '\nWARNING: an exact match exists elsewhere.' : '\nClose matches elsewhere can be cut too.')
-  return <span className={`offt ${cls}`} title={tip}>{label}</span>
+  if (ot.unique) return <span className={`offt ${cls}`} title={tip}>{label}</span>
+  return (
+    <button type="button" className={`offt offtdetails ${cls}`}
+      title={`${tip}\nClick to inspect potential off-target sites and nearby genes.`}
+      aria-label={`Mismatch counts ${label}; inspect potential off-target sites`}
+      onClick={(event) => {
+        event.stopPropagation()
+        onOpen?.(g)
+      }}>
+      {label}
+    </button>
+  )
 }
 
 function blockCell(g) {

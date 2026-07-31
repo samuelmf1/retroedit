@@ -320,12 +320,14 @@ export default function PlasmidModal({ open, onClose, spacer, scaffold, scaffold
   return (
     <div className="plasmidmodal" role="dialog" aria-modal="true" aria-label="Designed plasmid map">
       <header className="plasmidmodalhead">
+        <button type="button" className="plasmidclose" onClick={onClose} aria-label="Exit plasmid viewer">
+          <span aria-hidden="true">←</span> Exit map
+        </button>
         <div><strong>Designed pWB366 plasmid</strong><span>{design ? `${design.sequence.length.toLocaleString()} bp` : 'Loading template…'}</span></div>
         <nav aria-label="Plasmid views">
           <button type="button" className={tab === 'map' ? 'active' : ''} onClick={() => setTab('map')}>Map</button>
           <button type="button" className={tab === 'sequence' ? 'active' : ''} onClick={() => setTab('sequence')}>Sequence</button>
         </nav>
-        <button type="button" className="plasmidclose" onClick={onClose} aria-label="Close plasmid viewer">×</button>
       </header>
       <div className="plasmidmodalbody">
         {error && <div className="plasmiderror">{error}</div>}

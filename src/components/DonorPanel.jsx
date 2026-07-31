@@ -23,6 +23,7 @@ export default function DonorPanel({
   const [plasmidOpen, setPlasmidOpen] = useState(false)
   const closePlasmid = useCallback(() => setPlasmidOpen(false), [])
   const [copied, setCopied] = useState(null)
+  const [lengthDraft, setLengthDraft] = useState('')
 
   if (!guide) {
     return (
@@ -51,6 +52,10 @@ export default function DonorPanel({
   const armRatio = Math.abs(armLeft - armRight) <= 1
     ? '50:50'
     : Math.abs(pamSideArm / armTotal - 0.28) <= 0.015 ? '72:28' : null
+  const commitLengthDraft = () => {
+    if (lengthDraft !== '' && Number.isFinite(Number(lengthDraft))) onArmTotal(Number(lengthDraft))
+    setLengthDraft('')
+  }
 
 
   return (
@@ -64,39 +69,52 @@ export default function DonorPanel({
       </header>
 
       <div className="donorctl">
-        <label className="repairtemplatelength">
-          <span className="repairlengthhead">
-            <span>Repair template length</span>
-            <strong>{armTotal} nt</strong>
-          </span>
-          <span className="repairlengthcontrol">
-            <span aria-hidden="true">50</span>
-            <input
-              type="range"
-              min="50"
-              max="250"
-              step="1"
-              value={armTotal}
-              onChange={(event) => onArmTotal(Number(event.target.value))}
-              aria-label="Repair template length"
-              aria-valuetext={`${armTotal} nucleotides`}
-            />
-            <span aria-hidden="true">250 nt</span>
-          </span>
-        </label>
+        <div className="donortopcontrols">
+          <div className="repairtemplatelength">
+            <span className="repairlengthhead">
+              <span className="donorsectionlabel">Repair template length</span>
+              <span className="repairlengthvalue">
+                <input type="number" min="50" max="250" step="1"
+                  value={lengthDraft === '' ? armTotal : lengthDraft}
+                  onFocus={() => setLengthDraft(String(armTotal))}
+                  onChange={(event) => setLengthDraft(event.target.value)}
+                  onBlur={commitLengthDraft}
+                  onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur() }}
+                  aria-label="Repair template length in nucleotides" />
+                <span>nt</span>
+              </span>
+            </span>
+            <span className="repairlengthcontrol">
+              <span aria-hidden="true">50</span>
+              <input
+                type="range" min="50" max="250" step="1" value={armTotal}
+                onChange={(event) => { setLengthDraft(''); onArmTotal(Number(event.target.value)) }}
+                aria-label="Repair template length" aria-valuetext={`${armTotal} nucleotides`}
+              />
+              <span aria-hidden="true">250 nt</span>
+            </span>
+          </div>
+          <label className="field repairstrand">
+            <span className="donorsectionlabel">Repair template strand</span>
+            <select value={orientation} onChange={(e) => onOrientation(e.target.value)}>
+              <option value="auto">Auto (opposite the guide)</option>
+              <option value="sense">Sense (+)</option>
+              <option value="antisense">Antisense (−)</option>
+            </select>
+          </label>
+        </div>
         <div className="field grow">
-          <span>Homology arms (this guide)</span>
+          <span className="donorsectionlabel">Homology arms (this guide)</span>
           <ArmSlider left={armLeft} right={armRight} onLeft={onArmLeft} onRight={onArmRight} />
           <div className="armratio" role="group" aria-label="Homology arm design">
-            <span>Homology design</span>
-            <button type="button" className={armRatio === '50:50' ? 'active' : ''}
-              aria-pressed={armRatio === '50:50'} onClick={() => onArmRatio('50:50')}>
+            <span className="donorsectionlabel">Homology design</span>
+            <button type="button" className={armRatio === "50:50" ? "active" : ""}
+              aria-pressed={armRatio === "50:50"} onClick={() => onArmRatio("50:50")}>
               Symmetric <b>50:50</b>
             </button>
             <span className="armratiooption">
-              <button type="button" className={armRatio === '72:28' ? 'active' : ''}
-                aria-pressed={armRatio === '72:28'}
-                onClick={() => onArmRatio('72:28')}>
+              <button type="button" className={armRatio === "72:28" ? "active" : ""}
+                aria-pressed={armRatio === "72:28"} onClick={() => onArmRatio("72:28")}>
                 Asymmetric <b>72:28</b>
               </button>
               <span className="armratiotip" role="tooltip">
@@ -109,14 +127,6 @@ export default function DonorPanel({
             <small>shorter arm on PAM side</small>
           </div>
         </div>
-        <label className="field">
-          <span>Repair template strand</span>
-          <select value={orientation} onChange={(e) => onOrientation(e.target.value)}>
-            <option value="auto">Auto (opposite the guide)</option>
-            <option value="sense">Sense (+)</option>
-            <option value="antisense">Antisense (−)</option>
-          </select>
-        </label>
         {armsCustomized && (
           <button type="button" className="applyall" onClick={onApplyArmsToAll}>
             Apply arms to all sgRNAs

@@ -11,8 +11,8 @@ function formatBytes(bytes) {
 }
 
 const EXAMPLES = {
-  'human-grch38': ['PCSK9', 'rs11591147'],
-  'human-grch37': ['PCSK9', 'rs11591147'],
+  'human-grch38': ['HBB', 'rs334', 'chr11:5,227,002'],
+  'human-grch37': ['HBB', 'rs334'],
   'mouse-grcm39': ['Ltbr', 'Pcsk9'],
 }
 
@@ -203,7 +203,7 @@ export default function Controls({
               aria-controls="gene-suggestions"
               aria-activedescendant={activeSuggestion >= 0 ? `gene-suggestion-${activeSuggestion}` : undefined}
               value={query}
-              placeholder="PCSK9  ·  ENSG00000169174  ·  chr1:55,039,445–55,064,852  ·  rs11591147  ·  20-nt guide (either strand; no PAM)"
+              placeholder="HBB  ·  ENSG00000244734  ·  chr11:5,227,002  ·  rs334  ·  20-nt guide"
               title={dnaSequenceQuery ? 'Enter exactly 20 nucleotides from either strand. Do not include the PAM; the PAM field is applied automatically.' : undefined}
               onChange={(event) => {
                 setSuggestionsOpen(false)

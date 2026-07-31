@@ -838,6 +838,115 @@ def _stable_id(value: str) -> str:
     return value.split(".", 1)[0]
 
 
+@lru_cache(maxsize=4096)
+def _offtarget_gene_overview(assembly: str, gene_id: str) -> Optional[dict]:
+    gene = _gene_index(assembly).get(gene_id.upper())
+    if not gene:
+        return None
+    overview = {
+        "name": gene["name"], "id": gene["id"], "chrom": gene["chrom"],
+        "start": gene["start"], "end": gene["end"], "strand": gene["strand"], "exons": [],
+    }
+    try:
+        canonical = canonical_gene_exons(assembly=assembly, query=gene_id)
+    except Exception:
+        return overview
+    overview["exons"] = [
+        {"start": exon["start"], "end": exon["end"], "rank": exon.get("rank")}
+        for exon in canonical.get("exons", [])
+    ]
+    overview["transcript"] = canonical.get("transcript", {}).get("name")
+    return overview
+
+
+@lru_cache(maxsize=8192)
+def _offtarget_feature_context(assembly: str, chrom: str, start: int, end: int) -> Optional[dict]:
+    """Return canonical-transcript context for a short genomic match from local GENCODE."""
+    nearest = _nearest_gene(assembly, chrom, start, end)
+    if not nearest:
+        return None
+    overview = _offtarget_gene_overview(assembly, nearest["id"])
+    if nearest["distance"] != 0:
+        return {"region": "intergenic", "overview": overview}
+    path = GENCODE_GTF.get(assembly)
+    if not TABIX or not path or not path.exists() or not Path(str(path) + ".tbi").exists():
+        return {"region": "genic", "overview": overview}
+
+    transcripts: Dict[str, dict] = {}
+    features: List[dict] = []
+    for line in _tabix_query(path, chrom, max(1, start - 2), end + 2, limit=20_000):
+        fields = line.split("\t")
+        if len(fields) != 9:
+            continue
+        feature_type = fields[2]
+        if feature_type not in {"transcript", "exon", "CDS", "UTR", "five_prime_utr", "three_prime_utr"}:
+            continue
+        attrs = _gtf_attrs(fields[8])
+        if _stable_id(attrs.get("gene_id", "")) != nearest["id"]:
+            continue
+        transcript_id = _stable_id(attrs.get("transcript_id", ""))
+        if not transcript_id:
+            continue
+        if feature_type == "transcript":
+            tags = fields[8]
+            transcripts[transcript_id] = {
+                "id": transcript_id,
+                "name": attrs.get("transcript_name") or transcript_id,
+                "strand": -1 if fields[6] == "-" else 1,
+                "score": (
+                    4 if "MANE_Select" in tags else
+                    3 if "Ensembl_canonical" in tags else
+                    2 if "appris_principal" in tags else
+                    1 if "GENCODE_Primary" in tags else 0
+                ),
+                "proteinCoding": attrs.get("transcript_type") == "protein_coding",
+            }
+            continue
+        rank_text = attrs.get("exon_number", "")
+        features.append({
+            "type": feature_type, "transcript": transcript_id,
+            "start": int(fields[3]), "end": int(fields[4]),
+            "strand": -1 if fields[6] == "-" else 1,
+            "rank": int(rank_text) if rank_text.isdigit() else None,
+        })
+
+    if not transcripts:
+        return {"region": "genic", "overview": overview}
+    transcript = max(
+        transcripts.values(),
+        key=lambda item: (item["score"], item["proteinCoding"], item["id"]),
+    )
+    transcript_features = [item for item in features if item["transcript"] == transcript["id"]]
+    exact = [item for item in transcript_features if item["end"] >= start and item["start"] <= end]
+    exons = [item for item in exact if item["type"] == "exon"]
+    coding = any(item["type"] == "CDS" for item in exact)
+    utr = any(item["type"] in {"UTR", "five_prime_utr", "three_prime_utr"} for item in exact)
+    region = "CDS" if coding else "UTR" if utr else "exon" if exons else "intron"
+
+    splice_sites = []
+    nearby_exons = [item for item in transcript_features if item["type"] == "exon"]
+    for exon in nearby_exons:
+        boundaries = (
+            (exon["start"], "acceptor" if exon["strand"] == 1 else "donor"),
+            (exon["end"], "donor" if exon["strand"] == 1 else "acceptor"),
+        )
+        for boundary, kind in boundaries:
+            distance = 0 if start <= boundary <= end else min(abs(start - boundary), abs(end - boundary))
+            if distance <= 2 and kind not in splice_sites:
+                splice_sites.append(kind)
+
+    exon_ranks = sorted({item["rank"] for item in exons if item["rank"] is not None})
+    return {
+        "region": region,
+        "exons": exon_ranks,
+        "spliceSites": splice_sites,
+        "transcript": transcript["name"],
+        "transcriptId": transcript["id"],
+        "canonical": transcript["score"] >= 3,
+        "overview": overview,
+    }
+
+
 @lru_cache(maxsize=128)
 def _local_annotations_cached(assembly: str, chrom: str, start: int, end: int) -> dict:
     path = GENCODE_GTF.get(assembly)
@@ -1160,6 +1269,9 @@ def spacer_matches(req: SpacerMatchRequest) -> dict:
         match["nearestGene"] = _nearest_gene(
             assembly, match["chrom"], match["protoStart"], match["protoEnd"],
         )
+        match["annotation"] = _offtarget_feature_context(
+            assembly, match["chrom"], match["protoStart"], match["protoEnd"],
+        )
     truncated = any(count >= MAX_SPACER_ALIGNMENTS for count in hits_by_read.values()) or len(matches) > MAX_SPACER_MATCHES
     payload = {
         "available": True,
@@ -1250,6 +1362,7 @@ def offtargets(req: OffTargetRequest) -> OffTargetResponse:
         else:
             pam_start, pam_end = pos - 3, pos - 1
         regions.append(f"{chrom}:{max(1, pam_start)}-{pam_end}")
+        regions.append(f"{chrom}:{pos}-{pos + 19}")
         hits.setdefault(read_i, []).append(
             {"chrom": chrom, "pos": pos, "rev": rev, "mm": mm,
              "pam_region": (chrom, pam_start, pam_end)}
@@ -1266,6 +1379,8 @@ def offtargets(req: OffTargetRequest) -> OffTargetResponse:
             chrom, ps, pe = h["pam_region"]
             raw = pam_seq.get(f"{chrom}:{max(1, ps)}-{pe}", "")
             pam = raw if not h["rev"] else _revcomp(raw)
+            site_raw = pam_seq.get(f"{chrom}:{h['pos']}-{h['pos'] + 19}", "")
+            site = site_raw if not h["rev"] else _revcomp(site_raw)
             if not _pam_ok(pam, req.pam):
                 continue
             # Count every genomic match (the on-target is included, so a truly
@@ -1274,8 +1389,16 @@ def offtargets(req: OffTargetRequest) -> OffTargetResponse:
             counts[str(h["mm"])] = counts.get(str(h["mm"]), 0) + 1
             if not (g.get("chrom") and _same_locus(chrom, h["pos"], g)) and len(top) < 20:
                 top.append({"chrom": chrom, "pos": h["pos"],
-                            "strand": "-" if h["rev"] else "+", "mm": h["mm"], "pam": pam})
+                            "strand": "-" if h["rev"] else "+", "mm": h["mm"],
+                            "pam": pam, "sequence": site})
         top.sort(key=lambda t: t["mm"])
+        for hit in top:
+            hit["nearestGene"] = _nearest_gene(
+                assembly, hit["chrom"], hit["pos"], hit["pos"] + 19,
+            )
+            hit["annotation"] = _offtarget_feature_context(
+                assembly, hit["chrom"], hit["pos"], hit["pos"] + 19,
+            )
         unique = counts.get("0", 0) <= 1 and all(
             counts.get(str(k), 0) == 0 for k in range(1, MAX_MM + 1)
         )

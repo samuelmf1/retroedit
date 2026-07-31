@@ -143,7 +143,7 @@ export function findGuides({
     const spacer = strand === '+' ? protoFwd : reverseComplement(protoFwd)
     const pamSeq = strand === '+' ? pamFwd : reverseComplement(pamFwd)
     if (/[^ACGT]/.test(spacer)) return // skip guides over assembly gaps
-    const synthesisHomopolymer = spacer.match(/([ACG])\1{4,}/)?.[0] ?? null
+    const synthesisHomopolymer = spacer.match(/([ACGT])\1{4,}/)?.[0] ?? null
 
     const seedStart = strand === '+' ? protoEnd - SEED_LENGTH + 1 : protoStart
     const seedEnd = strand === '+' ? protoEnd : protoStart + SEED_LENGTH - 1

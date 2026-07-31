@@ -141,22 +141,22 @@ export default function FeatureRibbon({
           {currentExon && (
             <div className="exonnav" aria-label={`${exonNav.gene.name} canonical transcript navigation`}>
               <button type="button" className="frchip exonarrow exonpan"
-                disabled={navigationDisabled} title="Slide backward"
-                aria-label="Slide backward" onClick={onPanLeft}>←</button>
+                disabled={navigationDisabled} title="Slide left"
+                aria-label="Slide left" onClick={onPanLeft}>←</button>
               <button type="button" className="frchip exonarrow exonjump"
                 disabled={navigationDisabled || exonNav.index <= 0}
-                title="Previous exon" aria-label="Previous exon"
+                title="Snap to previous exon" aria-label="Snap to previous exon"
                 onClick={onPreviousExon}>⇤</button>
               <button type="button" className="frchip exoncurrent" disabled={navigationDisabled}
                 title="Center current exon"
                 onClick={onSnapExon}>{exonLabel}</button>
               <button type="button" className="frchip exonarrow exonjump"
                 disabled={navigationDisabled || exonNav.index >= exonNav.exons.length - 1}
-                title="Next exon" aria-label="Next exon"
+                title="Snap to next exon" aria-label="Snap to next exon"
                 onClick={onNextExon}>⇥</button>
               <button type="button" className="frchip exonarrow exonpan"
-                disabled={navigationDisabled} title="Slide forward"
-                aria-label="Slide forward" onClick={onPanRight}>→</button>
+                disabled={navigationDisabled} title="Slide right"
+                aria-label="Slide right" onClick={onPanRight}>→</button>
             </div>
           )}
         </div>
