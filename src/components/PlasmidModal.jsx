@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 let templateRequest = null
 const loadTemplate = () => {
@@ -100,22 +100,23 @@ function featureTitle(feature) {
   return `${feature.label} · ${(feature.start + 1).toLocaleString()}–${feature.end.toLocaleString()} · ${feature.end - feature.start} bp`
 }
 
-function CircularMap({ design, features, selected, onSelect }) {
+function CircularMap({ design, features, selected, onSelect, viewBox, gestureProps }) {
   const cx = 350
   const cy = 330
   const radius = 210
   const ticks = Array.from({ length: Math.ceil(design.sequence.length / 500) }, (_, index) => index * 500)
   return (
-    <svg className="plasmidmap circular" viewBox="0 0 700 660" aria-label={`Circular map of ${design.name}`}>
-      <circle cx={cx} cy={cy} r={radius + 5} fill="none" stroke="#1d2630" strokeWidth="2" />
-      <circle cx={cx} cy={cy} r={radius} fill="#fff" stroke="#1d2630" strokeWidth="3" />
+    <svg className="plasmidmap circular" viewBox={viewBox} aria-label={`Circular map of ${design.name}`}
+      {...gestureProps}>
+      <circle cx={cx} cy={cy} r={radius + 5} className="plasmidbackboneouter" />
+      <circle cx={cx} cy={cy} r={radius} className="plasmidbackboneinner" />
       {ticks.map((position) => {
         const degrees = position / design.sequence.length * 360
         const outer = polar(cx, cy, radius + 10, degrees)
         const inner = polar(cx, cy, radius - 8, degrees)
         const label = polar(cx, cy, radius - 25, degrees)
         const showLabel = position % 1000 === 0
-        return <g key={position}><line x1={inner.x} y1={inner.y} x2={outer.x} y2={outer.y} stroke="#4b5563" />
+        return <g key={position}><line className="plasmidtickline" x1={inner.x} y1={inner.y} x2={outer.x} y2={outer.y} />
           {showLabel && <text x={label.x} y={label.y} textAnchor="middle" dominantBaseline="middle"
             className="plasmidtick">{position.toLocaleString()}</text>}</g>
       })}
@@ -150,14 +151,15 @@ function CircularMap({ design, features, selected, onSelect }) {
   )
 }
 
-function LinearMap({ design, features, selected, onSelect }) {
+function LinearMap({ design, features, selected, onSelect, viewBox, gestureProps }) {
   const left = 70
   const width = 1060
   const xFor = (position) => left + position / design.sequence.length * width
   const ticks = Array.from({ length: Math.ceil(design.sequence.length / 250) + 1 }, (_, index) => index * 250)
     .filter((position) => position <= design.sequence.length)
   return (
-    <svg className="plasmidmap linear" viewBox="0 0 1200 460" aria-label={`Linearized map of ${design.name}`}>
+    <svg className="plasmidmap linear" viewBox={viewBox} aria-label={`Linearized map of ${design.name}`}
+      {...gestureProps}>
       <text x="600" y="46" textAnchor="middle" className="plasmidname">pWB366 designed plasmid · linearized at base 1</text>
       <line x1={left} x2={left + width} y1="108" y2="108" className="linearbackbone" />
       {ticks.map((position) => {
@@ -217,7 +219,57 @@ function PlasmidMap({ design }) {
   const features = mapFeatures(design)
   const [selected, setSelected] = useState(design.insertions[0])
   const [layout, setLayout] = useState('circle')
+  const baseView = layout === 'circle' ? { width: 700, height: 660 } : { width: 1200, height: 460 }
+  const [mapView, setMapView] = useState({ scale: 1, cx: 350, cy: 330 })
   useEffect(() => setSelected(design.insertions[0]), [design])
+  useEffect(() => {
+    setMapView({ scale: 1, cx: baseView.width / 2, cy: baseView.height / 2 })
+  }, [layout]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const zoomAt = useCallback((factor, clientX, clientY, element) => {
+    if (!Number.isFinite(factor) || factor <= 0 || !element) return
+    const rect = element.getBoundingClientRect()
+    if (!rect.width || !rect.height) return
+    const fx = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    const fy = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height))
+    setMapView((current) => {
+      const nextScale = Math.max(1, Math.min(6, current.scale * factor))
+      if (Math.abs(nextScale - current.scale) < 0.001) return current
+      const currentWidth = baseView.width / current.scale
+      const currentHeight = baseView.height / current.scale
+      const currentLeft = current.cx - currentWidth / 2
+      const currentTop = current.cy - currentHeight / 2
+      const anchorX = currentLeft + fx * currentWidth
+      const anchorY = currentTop + fy * currentHeight
+      const nextWidth = baseView.width / nextScale
+      const nextHeight = baseView.height / nextScale
+      const unclampedCx = anchorX + (0.5 - fx) * nextWidth
+      const unclampedCy = anchorY + (0.5 - fy) * nextHeight
+      return {
+        scale: nextScale,
+        cx: Math.max(nextWidth / 2, Math.min(baseView.width - nextWidth / 2, unclampedCx)),
+        cy: Math.max(nextHeight / 2, Math.min(baseView.height - nextHeight / 2, unclampedCy)),
+      }
+    })
+  }, [baseView.height, baseView.width])
+
+  const zoomFromCenter = useCallback((factor) => {
+    setMapView((current) => ({ ...current, scale: Math.max(1, Math.min(6, current.scale * factor)) }))
+  }, [])
+
+  const gestureProps = {
+    onWheel: (event) => {
+      // Trackpad pinch arrives as Ctrl/Command + wheel. Leave that gesture to
+      // the browser; map zoom is deliberately gated behind Shift.
+      if (!event.shiftKey || event.ctrlKey || event.metaKey) return
+      event.preventDefault()
+      zoomAt(Math.exp(-event.deltaY * 0.008), event.clientX, event.clientY, event.currentTarget)
+    },
+    onDoubleClick: () => setMapView({ scale: 1, cx: baseView.width / 2, cy: baseView.height / 2 }),
+  }
+  const visibleWidth = baseView.width / mapView.scale
+  const visibleHeight = baseView.height / mapView.scale
+  const viewBox = `${mapView.cx - visibleWidth / 2} ${mapView.cy - visibleHeight / 2} ${visibleWidth} ${visibleHeight}`
   return (
     <div className="plasmidmapview">
       <div className="plasmidmaptoolbar">
@@ -227,15 +279,24 @@ function PlasmidMap({ design }) {
           <button type="button" className={layout === 'linear' ? 'active' : ''}
             aria-pressed={layout === 'linear'} onClick={() => setLayout('linear')}>↔ Linearized</button>
         </div>
-        <span>Click a feature on the map or in the list to inspect it.</span>
+        <span>Click a feature to inspect it · Shift + scroll to zoom the map · normal pinch zooms the page.</span>
+        <div className="plasmidzoomcontrols" role="group" aria-label="Plasmid map zoom">
+          <button type="button" aria-label="Zoom plasmid map out" title="Zoom map out"
+            disabled={mapView.scale <= 1} onClick={() => zoomFromCenter(1 / 1.35)}>−</button>
+          <span>{Math.round(mapView.scale * 100)}%</span>
+          <button type="button" aria-label="Zoom plasmid map in" title="Zoom map in"
+            disabled={mapView.scale >= 6} onClick={() => zoomFromCenter(1.35)}>+</button>
+        </div>
         <div className="cargokeys">
           {design.insertions.map((feature) => <span key={feature.id}><i style={{ background: featureColor(feature) }} />{feature.label}</span>)}
         </div>
       </div>
       <div className={`plasmidmaplayout ${layout}`}>
         {layout === 'circle'
-          ? <CircularMap design={design} features={features} selected={selected} onSelect={setSelected} />
-          : <LinearMap design={design} features={features} selected={selected} onSelect={setSelected} />}
+          ? <CircularMap design={design} features={features} selected={selected} onSelect={setSelected}
+            viewBox={viewBox} gestureProps={gestureProps} />
+          : <LinearMap design={design} features={features} selected={selected} onSelect={setSelected}
+            viewBox={viewBox} gestureProps={gestureProps} />}
         <FeatureInspector features={features} selected={selected} onSelect={setSelected} />
       </div>
     </div>

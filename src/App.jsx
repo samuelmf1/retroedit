@@ -31,11 +31,12 @@ import { rs3Fill, rs3NeedsLightText } from './lib/color.js'
 import { DEFAULT_GENOME_ID, getGenome, loadRegion, loadRegionAnnotations, registerGenome, resolveLocus } from './lib/genome.js'
 import { cachedScore, checkRs3Health, scoreContexts } from './lib/rs3.js'
 import { biotypesPresent, buildFeatureItems } from './lib/features.js'
-import { CODON_TABLE, buildCodonTrack, codonAt } from './lib/codon.js'
+import { CODON_TABLE, buildCodonTrack, codonAt, codonsForAminoAcid } from './lib/codon.js'
 import { complementBase, findPatternIndices, reverseComplement } from './lib/bio.js'
 import { cachedOffTargets, fetchCanonicalExons, fetchNearbyFeatures, fetchOffTargets, fetchSpacerMatches, fetchVariants, genomicsStatus } from './lib/genomics.js'
 import { fetchCustomOffTargets, setCustomOffTargetReference } from './lib/customOfftargets.js'
 import { clinvarCategory } from './lib/variants.js'
+import { buildSnapGeneFile, isSnapGeneBuffer, parseSnapGeneFile } from './lib/snapgene.js'
 
 const DEFAULT_VIEW_OPTS = {
   featureLevels: { gene: true, transcript: false },
@@ -50,8 +51,8 @@ const MAF_WARN = 0.01 // polymorphism threshold that can impair a guide
 const RSID_DEFAULT_GNOMAD_MAF = 0.01
 const POSITION_VIEW_BP = 700
 const DEFAULT_OVERVIEW_HALF_SPAN = 100_000
-const MIN_OVERVIEW_HALF_SPAN = 1_000
-const MAX_OVERVIEW_HALF_SPAN = 5_000_000
+const MIN_OVERVIEW_HALF_SPAN = 5_000
+const MAX_OVERVIEW_HALF_SPAN = 500_000
 const EXON_CONTEXT_BP = 200
 const EXTEND_BP = 200
 const CUSTOM_GENOME_ID = 'custom-upload'
@@ -68,6 +69,170 @@ const GuideTable = lazy(loadGuideTable)
 const DonorPanel = lazy(loadDonorPanel)
 const SequenceViewer = lazy(loadSequenceViewer)
 const preloadWorkspace = () => Promise.all([loadGuideTable(), loadDonorPanel(), loadSequenceViewer()])
+
+const AMINO_ACID_NAMES = {
+  A: 'Alanine', C: 'Cysteine', D: 'Aspartate', E: 'Glutamate', F: 'Phenylalanine',
+  G: 'Glycine', H: 'Histidine', I: 'Isoleucine', K: 'Lysine', L: 'Leucine',
+  M: 'Methionine', N: 'Asparagine', P: 'Proline', Q: 'Glutamine', R: 'Arginine',
+  S: 'Serine', T: 'Threonine', V: 'Valine', W: 'Tryptophan', Y: 'Tyrosine', '*': 'Stop',
+}
+
+const FEATURE_COLOR_PRESETS = ['#2f6fed', '#7c3aed', '#0f9d76', '#d97706', '#dc3a30', '#db2777', '#526b7b']
+const DESIGN_PAIR_COLORS = ['#2f6fed', '#0f9d76', '#d97706', '#7c3aed', '#db2777', '#0072b2', '#e69f00', '#009e73']
+
+function CustomFeatureDialog({ draft, onClose, onApply }) {
+  const editing = Boolean(draft.id)
+  const [name, setName] = useState(draft.name ?? '')
+  const [color, setColor] = useState(draft.color ?? FEATURE_COLOR_PRESETS[0])
+  const valid = Boolean(name.trim())
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') onClose()
+      if (event.key === 'Enter' && valid) onApply({ ...draft, name: name.trim(), color })
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [color, draft, name, onApply, onClose, valid])
+
+  return (
+    <div className="spacermatchbackdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose()
+    }}>
+      <section className="featureeditmodal" role="dialog" aria-modal="true" aria-labelledby="feature-edit-title">
+        <header>
+          <div>
+            <div className="loadconfirmbrand">Sequence annotation</div>
+            <h2 id="feature-edit-title">{editing ? 'Edit feature' : 'Add selected DNA as a feature'}</h2>
+            <p>{draft.range} · {draft.length.toLocaleString()} bp</p>
+          </div>
+          <button type="button" className="spacermatchclose" aria-label="Close feature editor" onClick={onClose}>×</button>
+        </header>
+        <label className="featureeditname">
+          <span>Feature name</span>
+          <input autoFocus value={name} maxLength={80} placeholder="e.g. enhancer, primer binding site"
+            onChange={(event) => setName(event.target.value)} />
+        </label>
+        <fieldset className="featureeditcolors">
+          <legend>Feature color</legend>
+          <div>
+            {FEATURE_COLOR_PRESETS.map((preset) => (
+              <button key={preset} type="button" className={color === preset ? 'selected' : ''}
+                style={{ '--feature-choice': preset }} aria-label={`Use color ${preset}`}
+                aria-pressed={color === preset} onClick={() => setColor(preset)} />
+            ))}
+            <label className="featurecustomcolor" title="Choose a custom color">
+              <input type="color" value={color} onChange={(event) => setColor(event.target.value)} />
+              <span>Custom</span>
+            </label>
+          </div>
+        </fieldset>
+        <div className="featurepreview" style={{ '--feature-preview': color }}>
+          <span>{name.trim() || 'Feature preview'}</span>
+        </div>
+        <div className="loadconfirmactions">
+          <button type="button" onClick={onClose}>Cancel</button>
+          <button type="button" className="primary" disabled={!valid}
+            onClick={() => onApply({ ...draft, name: name.trim(), color })}>
+            {editing ? 'Save changes' : 'Add feature'}
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function AminoAcidEditDialog({ edit, onClose, onApply }) {
+  const [draft, setDraft] = useState('')
+  const [chosenCodon, setChosenCodon] = useState('')
+  const aminoAcid = draft.toUpperCase()
+  const choices = useMemo(
+    () => codonsForAminoAcid(edit.currentCodon, aminoAcid),
+    [edit.currentCodon, aminoAcid],
+  )
+  const selectedCodon = choices.some((choice) => choice.codon === chosenCodon)
+    ? chosenCodon
+    : choices[0]?.codon ?? ''
+  const recommendedCodon = choices[0]?.codon ?? ''
+  const valid = Boolean(AMINO_ACID_NAMES[aminoAcid])
+  const unchanged = selectedCodon === edit.currentCodon
+
+  useEffect(() => { setChosenCodon('') }, [aminoAcid])
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') onClose()
+      if (event.key === 'Enter' && selectedCodon && !unchanged) onApply(edit, selectedCodon)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [edit, onApply, onClose, selectedCodon, unchanged])
+
+  return (
+    <div className="spacermatchbackdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose()
+    }}>
+      <section className="aaeditmodal" role="dialog" aria-modal="true" aria-labelledby="aa-edit-title">
+        <header>
+          <div>
+            <div className="loadconfirmbrand">Coding edit</div>
+            <h2 id="aa-edit-title">Change amino acid</h2>
+            <p>{edit.transcript ? `${edit.transcript} · ` : ''}Current codon <code>{edit.currentCodon}</code> encodes <strong>{edit.currentAa}</strong> ({AMINO_ACID_NAMES[edit.currentAa] ?? 'Unknown'}).</p>
+          </div>
+          <button type="button" className="spacermatchclose" aria-label="Close amino-acid editor" onClick={onClose}>×</button>
+        </header>
+        <label className="aaeditinput">
+          <span>New amino acid</span>
+          <input
+            autoFocus
+            value={draft}
+            maxLength={1}
+            spellCheck="false"
+            aria-describedby="aa-edit-help"
+            onFocus={(event) => event.currentTarget.select()}
+            onChange={(event) => setDraft(event.target.value.toUpperCase().slice(-1))}
+            placeholder="V"
+          />
+          <span className="aaeditname">{valid ? AMINO_ACID_NAMES[aminoAcid] : ''}</span>
+        </label>
+        <p id="aa-edit-help" className="aaedithelp">Enter a standard one-letter amino-acid code, or <code>*</code> for a stop codon.</p>
+        {draft && !valid && <p className="aaediterror" role="alert">That is not a supported amino-acid code.</p>}
+        {valid && choices.length > 0 && (
+          <div className="aaeditchoices">
+            <div className="aaeditrecommendation">
+              <strong>Codon options</strong>
+              <span>Recommended: <code>{recommendedCodon}</code> · {choices[0].distance} nucleotide {choices[0].distance === 1 ? 'change' : 'changes'}</span>
+            </div>
+            <div className="aaeditcodons" role="radiogroup" aria-label={`All codons encoding ${AMINO_ACID_NAMES[aminoAcid]}`}>
+              {choices.map((choice) => (
+                <button
+                  key={choice.codon}
+                  type="button"
+                  role="radio"
+                  aria-checked={selectedCodon === choice.codon}
+                  aria-label={`${choice.codon}, ${choice.distance} nucleotide ${choice.distance === 1 ? 'change' : 'changes'}${choice.codon === recommendedCodon ? ', recommended' : ''}`}
+                  className={`${selectedCodon === choice.codon ? 'selected ' : ''}${choice.codon === recommendedCodon ? 'recommended' : ''}`.trim()}
+                  onClick={() => setChosenCodon(choice.codon)}
+                >
+                  <span className="codonbases">
+                    {edit.currentCodon.split('').map((base, index) => (
+                      <span key={index} className={base !== choice.codon[index] ? 'changed' : ''}>{choice.codon[index]}</span>
+                    ))}
+                  </span>
+                  <small>{choice.codon === recommendedCodon ? 'Recommended' : `${choice.distance} ${choice.distance === 1 ? 'edit' : 'edits'}`}</small>
+                </button>
+              ))}
+            </div>
+            {unchanged && <p className="aaeditunchanged">This codon already encodes the requested amino acid.</p>}
+          </div>
+        )}
+        <div className="loadconfirmactions">
+          <button type="button" onClick={onClose}>Cancel</button>
+          <button type="button" className="primary" disabled={!selectedCodon || unchanged} onClick={() => onApply(edit, selectedCodon)}>Apply codon edit</button>
+        </div>
+      </section>
+    </div>
+  )
+}
 
 function readLocationState() {
   const params = new URLSearchParams(window.location.search)
@@ -162,13 +327,13 @@ function parseCustomFasta(text, filename) {
   return records
 }
 
-function readTextFile(file, onProgress) {
+function readBinaryFile(file, onProgress) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
     reader.addEventListener('progress', (event) => onProgress?.(event.loaded, event.total || file.size))
     reader.addEventListener('load', () => resolve(reader.result))
     reader.addEventListener('error', () => reject(reader.error || new Error('Could not read this file.')))
-    reader.readAsText(file)
+    reader.readAsArrayBuffer(file)
   })
 }
 
@@ -179,6 +344,11 @@ function exportFilenameToken(value) {
     .replace(/[^A-Za-z0-9._-]+/g, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, 100) || 'designs'
+}
+
+function exportChromosomeToken(value) {
+  const bare = String(value ?? '').trim().replace(/^chr/i, '')
+  return `chr${bare || 'unknown'}`
 }
 
 function extendEditedSnapshot(snapshot, newRefSeq, oldRefLength, leftAdded) {
@@ -222,6 +392,9 @@ export default function App() {
   const [allGuidesRequested, setAllGuidesRequested] = useState(false)
 
   const [spacerMatchDialog, setSpacerMatchDialog] = useState(null)
+  const [aminoAcidEdit, setAminoAcidEdit] = useState(null)
+  const [featureDraft, setFeatureDraft] = useState(null)
+  const [customFeatures, setCustomFeatures] = useState([])
   const [loadConfirmOpen, setLoadConfirmOpen] = useState(false)
   const [loadConfirmCopy, setLoadConfirmCopy] = useState(null)
   // Undo/redo stacks of the edited-sequence array.
@@ -241,6 +414,10 @@ export default function App() {
   const [checked, setChecked] = useState(() => new Set())
   const [librarySignatures, setLibrarySignatures] = useState({})
   const [sidebarWidth, setSidebarWidth] = useState(640)
+  const [sequenceLineMode, setSequenceLineMode] = useState(() => {
+    const saved = window.sessionStorage.getItem('retroedit-sequence-line-mode')
+    return ['window', 'fixed', 'single'].includes(saved) ? saved : 'window'
+  })
 
   const [viewOpts, setViewOpts] = useState(DEFAULT_VIEW_OPTS)
   const [gStatus, setGStatus] = useState(null)
@@ -266,6 +443,7 @@ export default function App() {
   const [overviewTarget, setOverviewTarget] = useState(null)
 
   useEffect(() => { checkRs3Health().then(setRs3Status) }, [])
+  useEffect(() => { window.sessionStorage.setItem("retroedit-sequence-line-mode", sequenceLineMode) }, [sequenceLineMode])
   useEffect(() => { genomicsStatus().then(setGStatus) }, [])
 
   const requestLoadConfirmation = useCallback((copy = null) => new Promise((resolve) => {
@@ -337,7 +515,7 @@ export default function App() {
       let nextExonNav = null
       if (gid === CUSTOM_GENOME_ID) {
         const record = custom?.record
-        if (!record?.seq) throw new Error('Upload a FASTA or plain-DNA file first.')
+        if (!record?.seq) throw new Error('Upload a FASTA, plain-DNA, or SnapGene .dna file first.')
         const end = Math.min(record.length, POSITION_VIEW_BP)
         const center = Math.max(1, Math.ceil(end / 2))
         const locus = opts.locus ?? {
@@ -469,6 +647,8 @@ export default function App() {
         setOverviewHalfSpan(DEFAULT_OVERVIEW_HALF_SPAN)
         setSequenceSearch('')
         setSequenceMatchIndex(0)
+        setCustomFeatures([])
+        setFeatureDraft(null)
         if (gid !== CUSTOM_GENOME_ID) {
           const draft = readJsonStorage(window.sessionStorage, DRAFT_KEY, null)
           setPendingDraft(validDraftFor(draft, result.reference) ? draft : null)
@@ -555,6 +735,8 @@ export default function App() {
         setPast([])
         setFuture([])
         setSelection(null)
+        setCustomFeatures([])
+        setFeatureDraft(null)
         setSelectedGuideId(null)
         setPendingDraft(null)
       }
@@ -579,22 +761,26 @@ export default function App() {
       }
       setError(null)
       setCustomUploadProgress({ phase: 'reading', loaded: 0, total: file.size, name: file.name })
-      const text = await readTextFile(file, (loaded, total) => {
+      const buffer = await readBinaryFile(file, (loaded, total) => {
         setCustomUploadProgress({ phase: 'reading', loaded, total, name: file.name })
       })
       setCustomUploadProgress({ phase: 'parsing', loaded: file.size, total: file.size, name: file.name })
       await new Promise((resolve) => requestAnimationFrame(resolve))
-      const records = parseCustomFasta(text, file.name)
+      const snapGene = isSnapGeneBuffer(buffer)
+      if (/\.dna$/i.test(file.name) && !snapGene) throw new Error('This .dna file is not a valid SnapGene DNA file.')
+      const records = snapGene
+        ? [parseSnapGeneFile(buffer, file.name)]
+        : parseCustomFasta(new TextDecoder().decode(buffer), file.name)
       setCustomOffTargetReference(records)
-      const name = file.name.replace(/\.(?:fa|fasta|fna|fas|txt)$/i, '') || 'Custom DNA'
+      const name = file.name.replace(/\.(?:dna|fa|fasta|fna|fas|txt)$/i, '') || 'Custom DNA'
       const custom = { name, records, record: records[0] }
       const record = custom.record
       registerGenome({
         id: CUSTOM_GENOME_ID,
         organism: 'Custom', assembly: 'Uploaded DNA', provider: 'static',
-        maxRegionBp: 300_000, maxFeatureBp: 0,
+        maxRegionBp: 300_000, maxFeatureBp: 300_000,
         note: `${records.length.toLocaleString()} record${records.length === 1 ? '' : 's'}`,
-        data: { chrom: record.name, start: 1, end: record.length, seq: record.seq, features: [], cds: [] },
+        data: { chrom: record.name, start: 1, end: record.length, seq: record.seq, features: record.features ?? [], cds: record.cds ?? [] },
       })
       setCustomUpload(custom)
       setGenomeId(CUSTOM_GENOME_ID)
@@ -614,9 +800,9 @@ export default function App() {
     registerGenome({
       id: CUSTOM_GENOME_ID,
       organism: 'Custom', assembly: 'Uploaded DNA', provider: 'static',
-      maxRegionBp: 300_000, maxFeatureBp: 0,
+      maxRegionBp: 300_000, maxFeatureBp: 300_000,
       note: `${next.records.length.toLocaleString()} record${next.records.length === 1 ? '' : 's'}`,
-      data: { chrom: record.name, start: 1, end: record.length, seq: record.seq, features: [], cds: [] },
+      data: { chrom: record.name, start: 1, end: record.length, seq: record.seq, features: record.features ?? [], cds: record.cds ?? [] },
     })
     const result = await doLoad({ genomeId: CUSTOM_GENOME_ID, query: next.name, customSequence: next })
     if (result) setCustomUpload(next)
@@ -932,6 +1118,12 @@ export default function App() {
   const refSeq = region?.reference.seq ?? ''
   const isCustomRegion = region?.reference.genomeId === CUSTOM_GENOME_ID
   const frame = region?.frame ?? null
+  const invalidEditedBases = useMemo(() => edited.flatMap((record, index) => (
+    !record.del && !BASES.has(String(record.base).toUpperCase())
+      ? [{ index, base: String(record.base) }]
+      : []
+  )), [edited])
+  const hasInvalidEditedBases = invalidEditedBases.length > 0
 
   // Discover each guide geometry once per loaded reference/PAM. Edit-specific
   // views cheaply filter these stable records, preserving all cached metrics.
@@ -989,10 +1181,15 @@ export default function App() {
   useEffect(() => () => window.clearTimeout(emphasizedEditTimerRef.current), [])
 
   const exploringGuides = showAllGuides
-  const visibleGuideCandidates = exploringGuides ? allGuides : (derived?.guides ?? [])
+  const visibleGuideCandidates = hasInvalidEditedBases
+    ? []
+    : (exploringGuides ? allGuides : (derived?.guides ?? []))
   // Once requested, finish and retain metrics for the entire window even after
-  // an edit switches the UI back to its focused guide subset.
-  const metricGuideCandidates = allGuidesRequested ? allGuides : visibleGuideCandidates
+  // an edit switches the UI back to its focused guide subset. Invalid pasted
+  // symbols pause every downstream calculation until the sequence is repaired.
+  const metricGuideCandidates = hasInvalidEditedBases
+    ? []
+    : (allGuidesRequested ? allGuides : visibleGuideCandidates)
 
   const sequenceMatches = useMemo(() => {
     const pattern = sequenceSearch.trim().toUpperCase()
@@ -1183,10 +1380,6 @@ export default function App() {
       gene: region.reference.gene,
     })
     if (!viewOpts.featureLevels.gene) return items
-    const nav = exonNav
-    const annotationsReady = region.features.transcripts.length > 0
-    if (!nav?.exons?.length || !annotationsReady) return items
-
     const refStart = region.reference.start
     const refEnd = region.reference.end
     const lastRef = refSeq.length - 1
@@ -1199,6 +1392,24 @@ export default function App() {
         de: derived.dispEnd[Math.max(0, Math.min(lastRef, clippedEnd - refStart))],
       }
     }
+    const gene = region.reference.gene
+    if (gene) {
+      const tss = gene.strand === -1 ? gene.end : gene.start
+      const promoterStart = gene.strand === -1 ? tss - 50 : tss - 200
+      const promoterEnd = gene.strand === -1 ? tss + 200 : tss + 50
+      const display = toDisplay(promoterStart, promoterEnd)
+      if (display) items.push({
+        id: `promoter-${gene.id ?? gene.name}-${tss}`,
+        level: 'promoter', name: `${gene.name} promoter`, ...display,
+        strand: gene.strand,
+        source: 'inferred −200/+50 bp promoter window around the annotated transcription start site',
+      })
+    }
+
+    const nav = exonNav
+    const annotationsReady = region.features.transcripts.length > 0
+    if (!nav?.exons?.length || !annotationsReady) return items
+
     const canonicalTranscript = region.features.transcripts.find(
       (transcript) => transcript.id === nav.transcript.id,
     )
@@ -1286,8 +1497,10 @@ export default function App() {
         start: gene.start,
         end: gene.end,
         label: gene.name,
+        description: gene.description ?? '',
         strand: gene.strand,
         exons: exonNav?.exons ?? [],
+        coding: exonNav?.coding ?? [],
       }
     }
 
@@ -1325,6 +1538,7 @@ export default function App() {
     const changed = new Uint8Array(edited.length)
     const title = new Array(edited.length).fill('')
     const kind = new Array(edited.length).fill('')
+    const editTarget = new Array(edited.length).fill(null)
     const recordByRef = new Array(refSeq.length)
     const frameTranscript = region.features.transcripts.find(
       (transcript) => transcript.id === frame.transcript,
@@ -1393,10 +1607,23 @@ export default function App() {
           : bases.map(complementBase).join('')
         const editedAa = CODON_TABLE[editedCodon] ?? 'X'
         aa[middleDisplay] = editedAa
+        if (editedAa === '*') kind[middleDisplay] = 'stop'
+        if (editedAa !== 'X') {
+          editTarget[middleDisplay] = {
+            refIdx: codon.refIdx,
+            displayIdx: codon.refIdx.map((idx) => derived.dispStart[idx]),
+            referenceCodon: codon.codon,
+            currentCodon: editedCodon,
+            currentAa: editedAa,
+            strand: frame.strand,
+            transcript: frameLabel,
+          }
+        }
         effectTitle = editedCodon === codon.codon
-          ? `${codon.codon} · ${codon.aa ?? 'X'}`
+          ? `${codon.codon} · ${codon.aa ?? 'X'}${editedAa === '*' ? ' · stop codon' : ''}`
           : `${codon.codon} (${codon.aa ?? 'X'}) → ${editedCodon} (${editedAa})` +
-            (editedAa === codon.aa ? ' · synonymous' : '')
+            (editedAa === codon.aa ? ' · synonymous' : '') +
+            (editedAa === '*' ? ' · stop codon' : '')
       }
 
       effectTitle = frameLabel ? `${frameLabel} · ${effectTitle}` : effectTitle
@@ -1433,8 +1660,93 @@ export default function App() {
       d = end
     }
 
-    return { parity, aa, changed, title, kind, deletionSpans, largeDeletionMask }
+    return { parity, aa, changed, title, kind, editTarget, deletionSpans, largeDeletionMask }
   }, [region, derived, refSeq, edited, frame])
+
+  const detectedCodingFeatures = useMemo(() => {
+    if (!codonCells) return []
+    const features = []
+    codonCells.editTarget.forEach((target, middleDisplay) => {
+      if (!target || target.currentAa !== '*') return
+      features.push({
+        id: `stop-${target.refIdx.join('-')}`,
+        level: 'stop', name: `Stop codon · ${target.currentCodon}`,
+        ds: Math.min(...target.displayIdx), de: Math.max(...target.displayIdx),
+        strand: target.strand,
+        source: target.referenceCodon === target.currentCodon
+          ? `annotated coding frame${target.transcript ? ` · ${target.transcript}` : ''}`
+          : `introduced by sequence edit${target.transcript ? ` · ${target.transcript}` : ''}`,
+      })
+    })
+    return features
+  }, [codonCells])
+
+  const customFeatureItems = useMemo(() => {
+    if (!region || !derived) return []
+    const refStart = region.reference.start
+    const refEnd = region.reference.end
+    const lastRef = refSeq.length - 1
+    return customFeatures.flatMap((feature) => {
+      if (feature.chrom !== region.reference.chrom || feature.assembly !== region.reference.assembly) return []
+      if (feature.refStart == null || feature.refEnd == null) {
+        if (feature.referenceWindowStart !== refStart) return []
+        return [{ ...feature, level: 'custom', ds: feature.displayStart, de: feature.displayEnd, source: 'user annotation · inserted sequence' }]
+      }
+      if (feature.refEnd < refStart || feature.refStart > refEnd) return []
+      const clippedStart = Math.max(refStart, feature.refStart)
+      const clippedEnd = Math.min(refEnd, feature.refEnd)
+      return [{
+        ...feature,
+        level: 'custom',
+        ds: derived.dispStart[Math.max(0, Math.min(lastRef, clippedStart - refStart))],
+        de: derived.dispEnd[Math.max(0, Math.min(lastRef, clippedEnd - refStart))],
+        source: 'user annotation',
+      }]
+    })
+  }, [customFeatures, derived, refSeq.length, region])
+
+  const displayedFeatureItems = useMemo(
+    () => [...featureItems, ...detectedCodingFeatures, ...customFeatureItems],
+    [customFeatureItems, detectedCodingFeatures, featureItems],
+  )
+
+  const openCustomFeatureDialog = useCallback(({ ds, de, range, length }) => {
+    if (!region || ds == null || de == null || de < ds) return
+    const refs = edited.slice(ds, de + 1).map((record) => record.ref).filter((ref) => ref != null)
+    setFeatureDraft({
+      range, length,
+      refStart: refs.length ? region.reference.start + Math.min(...refs) : null,
+      refEnd: refs.length ? region.reference.start + Math.max(...refs) : null,
+      displayStart: ds,
+      displayEnd: de,
+      referenceWindowStart: region.reference.start,
+      chrom: region.reference.chrom,
+      assembly: region.reference.assembly,
+    })
+  }, [edited, region])
+
+  const addCustomFeature = useCallback((feature) => {
+    setCustomFeatures((current) => feature.id
+      ? current.map((existing) => existing.id === feature.id
+        ? { ...existing, name: feature.name, color: feature.color }
+        : existing)
+      : [...current, {
+        ...feature,
+        id: `custom-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      }])
+    setFeatureDraft(null)
+  }, [])
+
+  const editCustomFeature = useCallback((feature) => {
+    if (feature?.level !== 'custom' || !feature.id) return
+    setFeatureDraft(feature)
+  }, [])
+
+  const deleteCustomFeature = useCallback((feature) => {
+    if (feature?.level !== 'custom' || !feature.id) return
+    setCustomFeatures((current) => current.filter((existing) => existing.id !== feature.id))
+    setFeatureDraft((current) => current?.id === feature.id ? null : current)
+  }, [])
 
   // Always fetch gnomAD after an edit so common variants can flag affected
   // guides. ClinVar and visible sequence markers remain controlled by toggles.
@@ -1714,7 +2026,7 @@ export default function App() {
   }, [selectedArms, selectedGuide])
 
   const donor = useMemo(() => {
-    if (!region || !selectedGuide || !derived || exploringGuides) return null
+    if (!region || !selectedGuide || !derived || exploringGuides || hasInvalidEditedBases) return null
     return designDonor({
       refSeq,
       refStart: region.reference.start,
@@ -1728,7 +2040,7 @@ export default function App() {
       orientation,
       blockingChoice: selectedBlockingChoice,
     })
-  }, [region, selectedGuide, derived, refSeq, edited, pam, frame, selectedArms, orientation, selectedBlockingChoice, exploringGuides])
+  }, [region, selectedGuide, derived, refSeq, edited, pam, frame, selectedArms, orientation, selectedBlockingChoice, exploringGuides, hasInvalidEditedBases])
 
   // Aligned letter ribbons drawn directly against the track for the selected guide.
   const guideRibbon = useMemo(() => {
@@ -1781,6 +2093,7 @@ export default function App() {
   }, [guideView.items, armsFor, derived?.editList, pam, orientation, blockChoiceMap])
 
   const toggleChecked = useCallback((id) => {
+    if (hasInvalidEditedBases) return
     const removing = checked.has(id)
     setChecked((prev) => {
       const next = new Set(prev)
@@ -1794,9 +2107,10 @@ export default function App() {
       else updated[id] = librarySignatureFor(id)
       return updated
     })
-  }, [checked, librarySignatureFor])
+  }, [checked, librarySignatureFor, hasInvalidEditedBases])
 
   const addOrUpdateChecked = useCallback((id) => {
+    if (hasInvalidEditedBases) return
     const signature = librarySignatureFor(id)
     setChecked((prev) => {
       if (prev.has(id)) return prev
@@ -1805,15 +2119,16 @@ export default function App() {
       return next
     })
     setLibrarySignatures((current) => ({ ...current, [id]: signature }))
-  }, [librarySignatureFor])
+  }, [librarySignatureFor, hasInvalidEditedBases])
 
   const toggleAll = useCallback((ids) => {
+    if (hasInvalidEditedBases) return
     const removing = ids.every((id) => checked.has(id))
     setChecked(removing ? new Set() : new Set(ids))
     setLibrarySignatures(removing
       ? {}
       : Object.fromEntries(ids.map((id) => [id, librarySignatureFor(id)])))
-  }, [checked, librarySignatureFor])
+  }, [checked, librarySignatureFor, hasInvalidEditedBases])
 
   useEffect(() => {
     setChecked(new Set())
@@ -1826,11 +2141,11 @@ export default function App() {
     librarySignatures[selectedGuide.id] !== librarySignatureFor(selectedGuide.id)
   )
 
-  const exportGuides = useCallback((format) => {
-    if (!region || !derived) return
+  const exportGuides = useCallback((format, options = {}) => {
+    if (!region || !derived || hasInvalidEditedBases) return
     const chosen = guideView.sorted.filter((g) => g.metricsReady && checked.has(g.id))
     if (!chosen.length) return
-    const chrom = region.reference.chrom
+    const chrom = exportChromosomeToken(region.reference.chrom)
     const selectedRs3Column = `rs3_${rs3Model}`
     const rows = chosen.map((g) => {
       const arms = armsFor(g)
@@ -1841,7 +2156,7 @@ export default function App() {
         blockingChoice: blockChoiceMap[g.id] ?? null,
       })
       return {
-        id: `${g.strand === '+' ? 'fwd' : 'rev'}_chr${chrom}_${g.cutGenomic}`,
+        id: `${g.strand === '+' ? 'fwd' : 'rev'}_${chrom}_${g.cutGenomic}`,
         strand: g.strand,
         spacer: g.spacer,
         pam: g.pamSeq,
@@ -1856,31 +2171,221 @@ export default function App() {
         repair_template: d.ok ? d.ssodn : '',
         repair_template_strand: d.ok ? d.orientation : '',
         re_cut_disruption: d.ok ? d.blocking.reason : '',
+        _guide: g,
+        _donor: d.ok ? d : null,
       }
     })
 
     const exportStem = `retroedit_${exportFilenameToken(loadedControls?.query ?? query)}_${exportFilenameToken(pam)}`
+    const csvCell = (value) => `"${String(value ?? '').replaceAll('"', '""')}"`
+    if (format === 'dna') {
+      const sequence = edited.filter((record) => !record.del).map((record) => record.base).join('')
+      if (!sequence) return
+
+      const activeBefore = new Uint32Array(edited.length + 1)
+      for (let index = 0; index < edited.length; index += 1) {
+        activeBefore[index + 1] = activeBefore[index] + (edited[index].del ? 0 : 1)
+      }
+      const displayInterval = (ds, de) => {
+        const safeStart = Math.max(0, Math.min(edited.length - 1, Math.round(ds)))
+        const safeEnd = Math.max(safeStart, Math.min(edited.length - 1, Math.round(de)))
+        const start = activeBefore[safeStart]
+        const end = activeBefore[safeEnd + 1]
+        return end > start ? { start, end } : null
+      }
+
+      const editColors = { sub: '#7b3fe4', ins: '#18a66f', del: '#e13a32' }
+      const editKinds = { sub: 'Replacement', ins: 'Insertion', del: 'Deletion' }
+      const editFeatures = derived.editList.flatMap((edit) => {
+        let start = activeBefore[Math.max(0, Math.min(edited.length, edit.displayStart))]
+        let end = activeBefore[Math.max(0, Math.min(edited.length, edit.displayEnd + 1))]
+        const deletionBoundary = end <= start
+        if (deletionBoundary) {
+          start = Math.max(0, Math.min(sequence.length - 1, start))
+          end = Math.min(sequence.length, start + 1)
+        }
+        if (end <= start) return []
+        const kind = editKinds[edit.type] ?? 'Sequence edit'
+        return [{
+          name: edit.label, type: 'variation', level: 'edit', start, end, strand: 1,
+          color: editColors[edit.type] ?? '#7b3fe4',
+          source: `RetroEdit ${kind.toLowerCase()} · ${edit.length.toLocaleString()} bp${deletionBoundary ? ' · feature marks the deletion junction' : ''}`,
+        }]
+      })
+
+      const seen = new Set()
+      const annotationFeatures = displayedFeatureItems.flatMap((feature) => {
+        const interval = displayInterval(feature.ds, feature.de)
+        if (!interval) return []
+        const key = `${feature.name}:${interval.start}:${interval.end}:${feature.strand ?? 1}`
+        if (seen.has(key)) return []
+        seen.add(key)
+        return [{
+          name: feature.name, type: feature.type, level: feature.level,
+          ...interval, strand: feature.strand, color: feature.color, source: feature.source,
+        }]
+      })
+
+      const designFeatures = rows.flatMap((row, index) => {
+        const color = DESIGN_PAIR_COLORS[index % DESIGN_PAIR_COLORS.length]
+        const pair = `Design ${index + 1} · ${row.id}`
+        const guideInterval = displayInterval(row._guide.protoDS, row._guide.protoDE)
+        const donor = row._donor
+        const donorInterval = donor
+          ? displayInterval(derived.dispStart[donor.winStart], derived.dispEnd[donor.winEnd])
+          : null
+        return [
+          guideInterval && {
+            name: `${pair} · sgRNA target`, type: 'misc_binding', level: 'guide',
+            ...guideInterval, strand: row.strand === '+' ? 1 : -1, color,
+            source: `Matched design color: ${color} · spacer ${row.spacer} · PAM ${row.pam} · full sgRNA (${row.sgRNA_scaffold}) ${row.sgRNA}`,
+          },
+          donorInterval && {
+            name: `${pair} · repair template`, type: 'misc_feature', level: 'repair_template',
+            ...donorInterval, strand: row.repair_template_strand === 'antisense' ? -1 : 1, color,
+            source: `Matched design color: ${color} · ${row.repair_template_strand} repair template · ${row.repair_template} · re-cut disruption: ${row.re_cut_disruption || 'none'}`,
+          },
+        ].filter(Boolean)
+      })
+
+      const file = buildSnapGeneFile({
+        name: `RetroEdit designs · ${loadedControls?.query ?? query}`,
+        sequence,
+        features: [...editFeatures, ...annotationFeatures, ...designFeatures],
+        circular: false,
+      })
+      const url = URL.createObjectURL(new Blob([file], { type: 'application/octet-stream' }))
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${exportStem}_designs.dna`
+      anchor.click()
+      URL.revokeObjectURL(url)
+      return
+    }
     let text
     let filename
+    let mimeType = 'text/plain'
     if (format === 'fasta') {
       text = rows.map((r) =>
         `>${r.id}|spacer|${selectedRs3Column}=${r[selectedRs3Column]}\n${r.spacer}\n` +
         (r.repair_template ? `>${r.id}|repair_template_${r.repair_template_strand}\n${r.repair_template}\n` : ''),
       ).join('')
       filename = `${exportStem}.fasta`
+    } else if (format === 'idt-grna') {
+      text = [
+        ['Name', 'Sequence'],
+        ...rows.map((r) => [`${r.id}_gRNA_${r.sgRNA_scaffold}`, r.sgRNA]),
+      ].map((row) => row.map(csvCell).join(',')).join('\n') + '\n'
+      filename = `${exportStem}_IDT_gRNA.csv`
+      mimeType = 'text/csv'
+    } else if (format === 'idt-cloning') {
+      const topOverhang = String(options.topOverhang ?? '').toUpperCase()
+      const bottomOverhang = String(options.bottomOverhang ?? '').toUpperCase()
+      const includeBottom = options.includeBottom !== false
+      const namePattern = String(options.namePattern || '{guide}_{strand}')
+      const oligoName = (row, index, strand) => namePattern
+        .replaceAll('{guide}', row.id)
+        .replaceAll('{index}', String(index + 1))
+        .replaceAll('{strand}', strand)
+      text = [
+        ['Name', 'Sequence'],
+        ...rows.flatMap((r, index) => {
+          const oligos = [[oligoName(r, index, 'top'), `${topOverhang}${r.spacer}`]]
+          if (includeBottom) {
+            oligos.push([oligoName(r, index, 'bottom'), `${bottomOverhang}${reverseComplement(r.spacer)}`])
+          }
+          return oligos
+        }),
+      ].map((row) => row.map(csvCell).join(',')).join('\n') + '\n'
+      filename = `${exportStem}_IDT_cloning_oligos.csv`
+      mimeType = 'text/csv'
+    } else if (format === 'idt-gblocks') {
+      const donorRows = rows.filter((r) => r.repair_template)
+      if (!donorRows.length) return
+      text = [
+        ['Name', 'Sequence'],
+        ...donorRows.map((r) => [`${r.id}_repair_template_${r.repair_template_strand}`, r.repair_template]),
+      ].map((row) => row.map(csvCell).join(',')).join('\n') + '\n'
+      filename = `${exportStem}_IDT_gBlocks.csv`
+      mimeType = 'text/csv'
     } else {
       const cols = ['id', 'strand', 'spacer', 'pam', 'sgRNA', 'sgRNA_scaffold', selectedRs3Column, 'gc',
         'cut_genomic', 'cut_dist', 'context_30mer', 'repair_template', 'repair_template_strand', 're_cut_disruption']
       text = [cols.join('\t'), ...rows.map((r) => cols.map((c) => r[c]).join('\t'))].join('\n') + '\n'
       filename = `${exportStem}.tsv`
     }
-    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }))
+    const url = URL.createObjectURL(new Blob([text], { type: mimeType }))
     const a = document.createElement('a')
     a.href = url
     a.download = filename
     a.click()
     URL.revokeObjectURL(url)
-  }, [region, derived, guideView.sorted, checked, rs3Model, refSeq, edited, pam, frame, armsFor, orientation, blockChoiceMap, loadedControls, query])
+  }, [region, derived, guideView.sorted, checked, rs3Model, refSeq, edited, pam, frame, armsFor, orientation, blockChoiceMap, loadedControls, query, hasInvalidEditedBases, displayedFeatureItems])
+
+  const exportAnnotatedSnapGene = useCallback(() => {
+    if (!region || !derived || hasInvalidEditedBases) return
+    const sequence = edited.filter((record) => !record.del).map((record) => record.base).join('')
+    if (!sequence) return
+
+    const activeBefore = new Uint32Array(edited.length + 1)
+    for (let index = 0; index < edited.length; index += 1) {
+      activeBefore[index + 1] = activeBefore[index] + (edited[index].del ? 0 : 1)
+    }
+    const exportedLevels = new Set(['imported', 'custom', 'promoter', 'stop'])
+    const editColors = { sub: '#7b3fe4', ins: '#18a66f', del: '#e13a32' }
+    const editKinds = { sub: 'Replacement', ins: 'Insertion', del: 'Deletion' }
+    const editFeatures = derived.editList.flatMap((edit) => {
+      let start = activeBefore[Math.max(0, Math.min(edited.length, edit.displayStart))]
+      let end = activeBefore[Math.max(0, Math.min(edited.length, edit.displayEnd + 1))]
+      const deletionBoundary = end <= start
+      if (deletionBoundary) {
+        start = Math.max(0, Math.min(sequence.length - 1, start))
+        end = Math.min(sequence.length, start + 1)
+      }
+      if (end <= start) return []
+      const kind = editKinds[edit.type] ?? 'Sequence edit'
+      return [{
+        name: edit.label,
+        type: 'variation',
+        level: 'edit',
+        start,
+        end,
+        strand: 1,
+        color: editColors[edit.type] ?? '#7b3fe4',
+        source: `RetroEdit ${kind.toLowerCase()} · ${edit.length.toLocaleString()} bp${deletionBoundary ? ' · feature marks the deletion junction' : ''}`,
+      }]
+    })
+    const seen = new Set()
+    const annotationFeatures = displayedFeatureItems.flatMap((feature) => {
+      if (!exportedLevels.has(feature.level)) return []
+      const ds = Math.max(0, Math.min(edited.length - 1, Math.round(feature.ds)))
+      const de = Math.max(ds, Math.min(edited.length - 1, Math.round(feature.de)))
+      const start = activeBefore[ds]
+      const end = activeBefore[de + 1]
+      if (end <= start) return []
+      const key = `${feature.name}:${start}:${end}:${feature.strand ?? 1}`
+      if (seen.has(key)) return []
+      seen.add(key)
+      return [{
+        name: feature.name, type: feature.type,
+        level: feature.level, start, end,
+        strand: feature.strand, color: feature.color,
+        source: feature.source,
+      }]
+    })
+    const file = buildSnapGeneFile({
+      name: `RetroEdit ${loadedControls?.query ?? query}`,
+      sequence,
+      features: [...editFeatures, ...annotationFeatures],
+      circular: false,
+    })
+    const url = URL.createObjectURL(new Blob([file], { type: 'application/octet-stream' }))
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `retroedit_${exportFilenameToken(loadedControls?.query ?? query)}_annotated.dna`
+    anchor.click()
+    URL.revokeObjectURL(url)
+  }, [region, derived, hasInvalidEditedBases, edited, displayedFeatureItems, loadedControls, query])
 
   // ---- panel resizing ----
   const startResize = useCallback((event) => {
@@ -1906,6 +2411,24 @@ export default function App() {
     ? [Math.min(selection.anchor, selection.focus), Math.max(selection.anchor, selection.focus)]
     : null
 
+  const selectedFeatureDraft = useMemo(() => {
+    if (!selRange || !region?.reference) return null
+    const [start, end] = selRange
+    const selected = edited.slice(start, end)
+    let minRef = Infinity
+    let maxRef = -Infinity
+    selected.forEach((record) => {
+      if (record.ref == null) return
+      minRef = Math.min(minRef, record.ref)
+      maxRef = Math.max(maxRef, record.ref)
+    })
+    const chrom = String(region.reference.chrom).replace(/^chr/i, '')
+    const range = Number.isFinite(minRef) && Number.isFinite(maxRef)
+      ? `chr${chrom}:${(region.reference.start + minRef).toLocaleString()}${(region.reference.start + maxRef).toLocaleString()}`
+      : `edited bases ${(start + 1).toLocaleString()}${end.toLocaleString()}`
+    return { ds: start, de: end - 1, range, length: end - start }
+  }, [edited, region?.reference?.chrom, region?.reference?.start, selRange?.[0], selRange?.[1]])
+
   // Every mutating action goes through commit(), which records history.
   const commit = useCallback((next, nextCaret) => {
     setShowAllGuides(false)
@@ -1917,14 +2440,33 @@ export default function App() {
     setSelection(null)
   }, [edited])
 
+  const applyAminoAcidCodon = useCallback((target, codingCodon) => {
+    if (!target || !codingCodon || target.displayIdx.length !== 3) return
+    const next = edited.slice()
+    target.displayIdx.forEach((displayIndex, codonIndex) => {
+      const record = next[displayIndex]
+      if (!record || record.ref == null || record.del) return
+      const codingBase = codingCodon[codonIndex]
+      next[displayIndex] = {
+        ...record,
+        base: target.strand === 1 ? codingBase : complementBase(codingBase),
+        del: false,
+      }
+    })
+    commit(next, Math.max(...target.displayIdx) + 1)
+    setAminoAcidEdit(null)
+    requestAnimationFrame(() => viewerRef.current?.scrollToIndex?.(target.displayIdx[1], 'center'))
+  }, [commit, edited])
+
   const toggleGuideExplore = useCallback(() => {
+    if (hasInvalidEditedBases) return
     setSelectedGuideId(null)
     setShowAllGuides((current) => {
       const next = !current
       if (next) setAllGuidesRequested(true)
       return next
     })
-  }, [])
+  }, [hasInvalidEditedBases])
 
   const canUndo = past.length > 0
   const canRedo = future.length > 0
@@ -1989,6 +2531,32 @@ export default function App() {
       setSelection(null)
     }
   }, [edited, caret, selRange, commit, undo, redo])
+
+  const handlePaste = useCallback((event) => {
+    const raw = event.clipboardData?.getData('text/plain') ?? ''
+    if (!raw) return
+    event.preventDefault()
+    // Preserve every non-whitespace symbol so unsupported bases can be seen
+    // and corrected instead of being silently discarded.
+    const pasted = raw.replace(/\s+/g, '').toUpperCase()
+    if (!pasted) return
+    const start = selRange ? selRange[0] : caret
+    const next = selRange
+      ? replaceRange(edited, selRange[0], selRange[1], pasted)
+      : insertAt(edited, caret, pasted)
+    commit(next, start + Array.from(pasted).length)
+  }, [edited, caret, selRange, commit])
+
+  const focusFirstInvalidBase = useCallback(() => {
+    const first = invalidEditedBases[0]
+    if (!first) return
+    setSelection({ anchor: first.index, focus: first.index + 1 })
+    setCaret(first.index + 1)
+    requestAnimationFrame(() => {
+      viewerRef.current?.scrollToIndexCentered(first.index)
+      viewerRef.current?.focus()
+    })
+  }, [invalidEditedBases])
 
   // Left and Right always belong to the sequence cursor once a sequence is
   // loaded. Text-entry controls and modal dialogs retain native arrow behavior.
@@ -2091,6 +2659,22 @@ export default function App() {
         onClearSelection={setSelection}
         loadChanged={loadChanged}
       />
+      {featureDraft && (
+        <CustomFeatureDialog
+          draft={featureDraft}
+          onClose={() => setFeatureDraft(null)}
+          onApply={addCustomFeature}
+        />
+      )}
+
+      {aminoAcidEdit && (
+        <AminoAcidEditDialog
+          edit={aminoAcidEdit}
+          onClose={() => setAminoAcidEdit(null)}
+          onApply={applyAminoAcidCodon}
+        />
+      )}
+
       {loadConfirmOpen && (
         <div
           className="spacermatchbackdrop"
@@ -2220,6 +2804,9 @@ export default function App() {
                 onRedo={redo}
                 onRevert={revert}
                 onEditFocus={focusEditInViewer}
+                customFeatureCount={customFeatureItems.length + derived.editList.length}
+                onDownloadSnapGene={exportAnnotatedSnapGene}
+                snapGeneDisabled={hasInvalidEditedBases}
                 annotationOptions={viewOpts}
                 onAnnotationChange={setViewOpts}
                 biotypes={biotypes}
@@ -2228,6 +2815,11 @@ export default function App() {
                 inputKey={query}
                 loadedInputKey={loadedControls?.query ?? query}
                 showAnnotations={!isCustomRegion}
+                sequenceLineMode={sequenceLineMode}
+                onSequenceLineMode={setSequenceLineMode}
+                exploreGuides={exploringGuides}
+                onExploreGuides={toggleGuideExplore}
+                sequenceBlocked={hasInvalidEditedBases}
                 sequenceSearch={sequenceSearch}
                 onSequenceSearch={(value) => {
                   setSequenceSearch(value)
@@ -2238,19 +2830,32 @@ export default function App() {
                 onPreviousSequenceMatch={() => stepSequenceMatch(-1)}
                 onNextSequenceMatch={() => stepSequenceMatch(1)}
               />
+              {hasInvalidEditedBases && (
+                <div className="sequencevalidation" role="alert">
+                  <span>
+                    <strong>Fix pasted sequence before continuing.</strong>{' '}
+                    {invalidEditedBases.length} unsupported {invalidEditedBases.length === 1 ? 'symbol' : 'symbols'} found
+                    ({[...new Set(invalidEditedBases.map((item) => item.base))].slice(0, 8).join(', ')}).
+                    Use only A, C, G, or T; highlighted symbols remain editable.
+                  </span>
+                  <button type="button" onClick={focusFirstInvalidBase}>Go to first issue</button>
+                </div>
+              )}
               <SequenceViewer
                 ref={viewerRef}
                 reference={region.reference}
                 locusOverview={locusOverview}
                 overviewTarget={overviewTarget}
                 edited={edited}
+                lineMode={sequenceLineMode}
                 guideItems={guideView.items}
-                featureItems={featureItems}
+                featureItems={displayedFeatureItems}
                 guideRibbon={guideRibbon}
                 donorRibbon={donorRibbon}
                 cutColumn={selectedGuide ? selectedGuide.cutDS : null}
                 tss={tssMarker}
                 codonCells={codonCells}
+                onAminoAcidEdit={setAminoAcidEdit}
                 variantItems={displayedVariantItems}
                 focusSpan={focusSpanDisplay}
                 emphasizedEdit={emphasizedEdit}
@@ -2258,6 +2863,10 @@ export default function App() {
                 junctions={derived.junctions}
                 caret={caret}
                 selection={selection}
+                featureSelection={selectedFeatureDraft}
+                onAddFeature={openCustomFeatureDialog}
+                onEditFeature={editCustomFeature}
+                onDeleteFeature={deleteCustomFeature}
                 sequenceSearch={sequenceSearch}
                 searchMatches={sequenceMatches}
                 searchMatchIndex={sequenceMatchIndex}
@@ -2272,6 +2881,7 @@ export default function App() {
                 onOverviewExon={isCustomRegion ? undefined : snapToExon}
                 overviewDisabled={loading}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
                 onExtendLeft={() => extendRegion(-1)}
                 onExtendRight={() => extendRegion(1)}
                 extensionDisabled={loading}
@@ -2284,8 +2894,8 @@ export default function App() {
               <GuideTable
                 guides={guideView.sorted}
                 hasEdits={derived.edits}
+                sequenceBlocked={hasInvalidEditedBases}
                 exploreMode={exploringGuides}
-                onExploreMode={toggleGuideExplore}
                 rs3Model={rs3Model}
                 onRs3Model={setRs3Model}
                 scorable={scorable}
@@ -2298,6 +2908,7 @@ export default function App() {
                 offAvailable={offTargets.available}
                 variantWarn={guideVariantWarn}
                 assembly={region.reference.assembly}
+                pamPattern={pam}
                 showOffTargets
                 getOffTargetHref={offTargetLocusHref}
               />
@@ -2345,7 +2956,7 @@ function GettingStarted() {
       </header>
       <div className="tutorialstart">
         <span className="tutorialnumber">1</span>
-        <div><h2>Input gene or locus</h2><p>Type a symbol, rsID, or coordinate above, or choose an example chip, then press Load.</p></div>
+        <div><h2>Input gene or locus</h2><p>Type a symbol, rsID, or coordinate above and press Load, or choose an example button.</p></div>
       </div>
       <div className="tutorialnavigate">
         <div className="tutorialstep compact">

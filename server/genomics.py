@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import json
+import gzip
 import threading
 import time
 import re
@@ -26,6 +27,11 @@ from urllib.request import Request, urlopen
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
+try:
+    import sassy
+except ImportError:  # Optional: the standard Bowtie search remains available.
+    sassy = None
 
 router = APIRouter(prefix="/api/genomics")
 
@@ -46,6 +52,10 @@ GNOMAD_API_TIMEOUT = float(os.environ.get("GNOMAD_API_TIMEOUT", "15"))
 GNOMAD_API_CACHE_TTL = int(os.environ.get("GNOMAD_API_CACHE_TTL", "900"))
 GNOMAD_API_CACHE_SIZE = int(os.environ.get("GNOMAD_API_CACHE_SIZE", "256"))
 OFFTARGET_CACHE_SIZE = int(os.environ.get("OFFTARGET_CACHE_SIZE", "10000"))
+ADVANCED_OFFTARGET_CACHE_SIZE = int(os.environ.get("ADVANCED_OFFTARGET_CACHE_SIZE", "256"))
+ADVANCED_OFFTARGET_MAX_RESULTS = int(os.environ.get("ADVANCED_OFFTARGET_MAX_RESULTS", "100"))
+ADVANCED_OFFTARGET_TIMEOUT = int(os.environ.get("ADVANCED_OFFTARGET_TIMEOUT", "300"))
+ADVANCED_OFFTARGET_CHUNK_BP = int(os.environ.get("ADVANCED_OFFTARGET_CHUNK_BP", "5000000"))
 GNOMAD_REMOTE_DATASETS = {
     "GRCh38": "gnomad_r4",
     "GRCh37": "gnomad_r2_1",
@@ -66,6 +76,7 @@ GENE_INDEX = {
     "GRCh38": INDEX_DIR / "GRCh38.genes.tsv",
     "GRCh37": INDEX_DIR / "GRCh37.genes.tsv",
 }
+GENE_NAMES = PROJECT_ROOT / "server" / "data" / "HGNC.gene_names.tsv.gz"
 
 GENCODE_GTF = {
     "GRCh38": INDEX_DIR / "GRCh38.gencode.gtf.gz",
@@ -612,12 +623,27 @@ def _faidx_ready(assembly: str) -> bool:
     return Path(str(_faidx_fasta(assembly)) + ".fai").exists()
 
 
+@lru_cache(maxsize=1)
+def _approved_gene_names() -> Dict[str, str]:
+    """HGNC-approved human gene names keyed by current symbol."""
+    if not GENE_NAMES.exists():
+        return {}
+    names: Dict[str, str] = {}
+    with gzip.open(GENE_NAMES, "rt") as handle:
+        for line in handle:
+            symbol, separator, name = line.rstrip("\n").partition("\t")
+            if separator and symbol and name:
+                names[symbol.upper()] = name
+    return names
+
+
 @lru_cache(maxsize=3)
 def _gene_index(assembly: str) -> Dict[str, dict]:
     path = GENE_INDEX.get(assembly)
     if not path or not path.exists():
         return {}
     genes: Dict[str, dict] = {}
+    approved_names = _approved_gene_names() if assembly in {"GRCh38", "GRCh37"} else {}
     with path.open() as handle:
         for line in handle:
             fields = line.rstrip("\n").split("\t")
@@ -628,10 +654,12 @@ def _gene_index(assembly: str) -> Dict[str, dict]:
                 "id": gene_id, "name": display_name, "chrom": chrom,
                 "start": int(start), "end": int(end),
                 "strand": -1 if strand == "-" else 1,
-                "canonical": None, "description": "",
+                "canonical": None, "description": approved_names.get(display_name.upper(), ""),
             }
             genes.setdefault(name_key, record)
             genes.setdefault(gene_id.upper(), record)
+            if record["description"]:
+                genes.setdefault(record["description"].upper(), record)
     return genes
 
 @lru_cache(maxsize=3)
@@ -700,11 +728,15 @@ def _nearest_gene(assembly: str, chrom: str, start: int, end: int) -> Optional[d
     return {"name": gene["name"], "id": gene["id"], "distance": distance(gene)}
 
 @lru_cache(maxsize=3)
-def _gene_search_indexes(assembly: str) -> tuple[tuple, tuple]:
+def _gene_search_indexes(assembly: str) -> tuple[tuple, tuple, tuple]:
     catalog = _gene_catalog(assembly)
     names = tuple(sorted((gene["name"].upper(), gene["id"], gene) for gene in catalog))
     ids = tuple(sorted((gene["id"].upper(), gene["id"], gene) for gene in catalog))
-    return names, ids
+    full_names = tuple(sorted(
+        (gene["description"].upper(), gene["id"], gene)
+        for gene in catalog if gene.get("description")
+    ))
+    return names, ids, full_names
 
 
 def _prefix_matches(entries: tuple, term: str) -> tuple:
@@ -721,10 +753,10 @@ def gene_suggestions(assembly: str, query: str, limit: int = 8) -> dict:
     if len(term) < 2 or term.startswith("RS") or ":" in term:
         return {"suggestions": []}
     limit = max(1, min(12, limit))
-    names, ids = _gene_search_indexes(assembly)
+    names, ids, full_names = _gene_search_indexes(assembly)
     ranked = []
     seen = set()
-    for rank, entries in enumerate((names, ids)):
+    for rank, entries in enumerate((names, ids, full_names)):
         for key, gene_id, gene in _prefix_matches(entries, term):
             if gene_id in seen:
                 continue
@@ -735,10 +767,12 @@ def gene_suggestions(assembly: str, query: str, limit: int = 8) -> dict:
     # a whole-catalog scan for the common path and for Ensembl IDs.
     if len(ranked) < limit and len(term) >= 3 and not term.startswith("ENS"):
         for gene in _gene_catalog(assembly):
-            name = gene["name"].upper()
-            if gene["id"] not in seen and term in name:
+            symbol = gene["name"].upper()
+            full_name = gene.get("description", "").upper()
+            match_key = symbol if term in symbol else full_name if term in full_name else ""
+            if gene["id"] not in seen and match_key:
                 seen.add(gene["id"])
-                ranked.append((2, len(name), name, gene))
+                ranked.append((3, len(match_key), match_key, gene))
     ranked.sort(key=lambda item: item[:3])
     return {"suggestions": [item[3] for item in ranked[:limit]]}
 
@@ -1038,11 +1072,12 @@ def canonical_gene_exons(assembly: str, query: str) -> dict:
     gene_id = gene["id"]
     transcripts: Dict[str, dict] = {}
     exons_by_transcript: Dict[str, List[dict]] = {}
+    coding_by_transcript: Dict[str, List[dict]] = {}
     for line in _tabix_query(
         path, gene["chrom"], gene["start"], gene["end"], limit=200_000,
     ):
         fields = line.split("\t")
-        if len(fields) != 9 or fields[2] not in {"transcript", "exon"}:
+        if len(fields) != 9 or fields[2] not in {"transcript", "exon", "CDS"}:
             continue
         attrs = _gtf_attrs(fields[8])
         if _stable_id(attrs.get("gene_id", "")) != gene_id:
@@ -1065,11 +1100,16 @@ def canonical_gene_exons(assembly: str, query: str) -> dict:
                 "score": canonical_score,
                 "protein_coding": attrs.get("transcript_type") == "protein_coding",
             }
-        else:
+        elif fields[2] == "exon":
             rank = attrs.get("exon_number", "")
             exons_by_transcript.setdefault(transcript_id, []).append({
                 "id": _stable_id(attrs.get("exon_id", "")),
                 "rank": int(rank) if rank.isdigit() else None,
+                "start": int(fields[3]),
+                "end": int(fields[4]),
+            })
+        else:
+            coding_by_transcript.setdefault(transcript_id, []).append({
                 "start": int(fields[3]),
                 "end": int(fields[4]),
             })
@@ -1092,10 +1132,21 @@ def canonical_gene_exons(assembly: str, query: str) -> dict:
         exons_by_transcript[transcript["id"]],
         key=lambda exon: (exon["start"], exon["end"]),
     )
+    coding = sorted(
+        coding_by_transcript.get(transcript["id"], []),
+        key=lambda segment: (segment["start"], segment["end"]),
+    )
+    cds_start = None
+    if coding:
+        cds_start = (
+            min(segment["start"] for segment in coding) if transcript["strand"] == 1
+            else max(segment["end"] for segment in coding)
+        )
     return {
         "gene": {
             "id": gene_id, "name": gene["name"],
             "start": gene["start"], "end": gene["end"], "strand": gene["strand"],
+            "description": gene.get("description", ""),
         },
         "transcript": {
             "id": transcript["id"],
@@ -1104,6 +1155,8 @@ def canonical_gene_exons(assembly: str, query: str) -> dict:
         },
         "chrom": gene["chrom"],
         "exons": exons,
+        "coding": coding,
+        "cdsStart": cds_start,
     }
 
 
@@ -1122,6 +1175,12 @@ class SpacerMatchRequest(BaseModel):
     spacer: str
     pam: str = "NGG"
 
+
+class AdvancedOffTargetRequest(BaseModel):
+    assembly: str
+    pam: str = "NGG"
+    guide: dict  # {id, spacer, chrom, cutGenomic, protoGenomic}
+
 class GuideOffTargets(BaseModel):
     id: str
     counts: Dict[str, int]     # genomic matches by mismatch, on-target included: {"0":1,"1":0,"2":0}
@@ -1139,6 +1198,240 @@ _offtarget_cache: OrderedDict[tuple, dict] = OrderedDict()
 _offtarget_cache_lock = threading.Lock()
 _spacer_match_cache: OrderedDict[tuple, dict] = OrderedDict()
 _spacer_match_cache_lock = threading.Lock()
+_advanced_offtarget_cache: OrderedDict[tuple, dict] = OrderedDict()
+_advanced_offtarget_cache_lock = threading.Lock()
+
+
+_CIGAR_RE = re.compile(r"(\d+)([=XID])")
+
+
+def _canonical_search_contigs(assembly: str) -> tuple[tuple[str, int], ...]:
+    """Nuclear primary contigs only; skip decoys/alts and mitochondrial DNA."""
+    maximum = 19 if assembly == "GRCm39" else 22
+    allowed = {str(value) for value in range(1, maximum + 1)} | {"X", "Y"}
+    fai = Path(str(_faidx_fasta(assembly)) + ".fai")
+    if not fai.exists():
+        return ()
+    result = []
+    with fai.open() as handle:
+        for line in handle:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) >= 2 and fields[0].removeprefix("chr").upper() in allowed:
+                result.append((fields[0], int(fields[1])))
+    return tuple(result)
+
+
+def _load_faidx_region(assembly: str, contig: str, start: int, end: int) -> bytes:
+    """Read a bounded indexed region; advanced search never holds a chromosome."""
+    proc = subprocess.Popen(
+        [SAMTOOLS, "faidx", str(_faidx_fasta(assembly)), f"{contig}:{start}-{end}"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    sequence = bytearray()
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        if not line.startswith(b">"):
+            sequence.extend(line.strip())
+    stderr = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
+    if proc.wait() != 0:
+        raise RuntimeError(stderr.strip() or f"samtools faidx failed for {contig}:{start}-{end}")
+    result = bytes(sequence).upper()
+    sequence.clear()
+    return result
+
+
+def _sassy_alignment(query: str, matched: str, cigar: str) -> dict:
+    """Expand Sassy CIGAR into fixed columns and locate PAM-proximal seed edits."""
+    query_index = match_index = 0
+    query_aligned: List[str] = []
+    match_aligned: List[str] = []
+    seed_columns: List[int] = []
+    substitutions = insertions = deletions = 0
+    operations = _CIGAR_RE.findall(cigar)
+    if not operations or "".join(f"{count}{op}" for count, op in operations) != cigar:
+        raise ValueError(f"unsupported Sassy CIGAR {cigar}")
+    for count_text, operation in operations:
+        for _ in range(int(count_text)):
+            column = len(query_aligned)
+            if operation in {"=", "X"}:
+                query_aligned.append(query[query_index])
+                match_aligned.append(matched[match_index])
+                if operation == "X":
+                    substitutions += 1
+                    if query_index >= 10:
+                        seed_columns.append(column)
+                query_index += 1
+                match_index += 1
+            elif operation == "I":
+                # Sassy I consumes query only: guide/RNA bulge relative to DNA.
+                query_aligned.append(query[query_index])
+                match_aligned.append("-")
+                insertions += 1
+                if query_index >= 10:
+                    seed_columns.append(column)
+                query_index += 1
+            else:  # D consumes target text only: DNA bulge relative to guide.
+                query_aligned.append("-")
+                match_aligned.append(matched[match_index])
+                deletions += 1
+                if query_index >= 10:
+                    seed_columns.append(column)
+                match_index += 1
+    if query_index != len(query) or match_index != len(matched):
+        raise ValueError(f"CIGAR {cigar} does not span the query and match")
+    bulge_type = (
+        "mixed bulges" if insertions and deletions else
+        "RNA bulge" if insertions else
+        "DNA bulge" if deletions else None
+    )
+    return {
+        "queryAligned": "".join(query_aligned),
+        "matchAligned": "".join(match_aligned),
+        "seedColumns": seed_columns,
+        "seedEditCount": len(seed_columns),
+        "substitutions": substitutions,
+        "insertions": insertions,
+        "deletions": deletions,
+        "bulgeType": bulge_type,
+    }
+
+
+def _advanced_hit_sort_key(hit: dict, guide: dict) -> tuple:
+    query_chrom = str(guide.get("chrom", "")).removeprefix("chr").upper()
+    hit_chrom = str(hit.get("chrom", "")).removeprefix("chr").upper()
+    query_position = int(guide.get("protoGenomic") or guide.get("cutGenomic") or 0)
+    try:
+        hit_rank = int(hit_chrom)
+    except ValueError:
+        hit_rank = 23 if hit_chrom == "X" else 24 if hit_chrom == "Y" else 1000
+    try:
+        query_rank = int(query_chrom)
+    except ValueError:
+        query_rank = 23 if query_chrom == "X" else 24 if query_chrom == "Y" else 1000
+    return (
+        int(hit["cost"]),
+        0 if hit_chrom == query_chrom else 1,
+        abs(int(hit["pos"]) - query_position) if hit_chrom == query_chrom else abs(hit_rank - query_rank),
+        hit_rank,
+        int(hit["pos"]),
+    )
+
+
+@router.post("/offtargets-advanced")
+def advanced_offtargets(req: AdvancedOffTargetRequest) -> dict:
+    """Opt-in edit-distance search (substitutions plus DNA/RNA bulges) via Sassy."""
+    assembly = req.assembly
+    spacer = str(req.guide.get("spacer", "")).strip().upper()
+    pam_pattern = req.pam.strip().upper()
+    if assembly not in GENOME_FASTA:
+        raise HTTPException(status_code=422, detail=f"unsupported assembly {assembly}")
+    if not re.fullmatch(r"[ACGT]{20}", spacer):
+        raise HTTPException(status_code=422, detail="guide spacer must be exactly 20 A/C/G/T bases")
+    if not re.fullmatch(r"[ACGTRYSWKMBDHVN]{1,8}", pam_pattern):
+        raise HTTPException(status_code=422, detail="invalid PAM pattern")
+    if sassy is None:
+        return {"available": False, "detail": "advanced search unavailable: install sassy-rs"}
+    if not SAMTOOLS or not _faidx_ready(assembly):
+        return {"available": False, "detail": "indexed reference genome unavailable"}
+
+    cache_key = _offtarget_cache_key(assembly, pam_pattern, req.guide)
+    with _advanced_offtarget_cache_lock:
+        cached = _advanced_offtarget_cache.get(cache_key)
+        if cached is not None:
+            _advanced_offtarget_cache.move_to_end(cache_key)
+            return cached
+
+    started = time.monotonic()
+    query = spacer.encode("ascii")
+    pam_length = len(pam_pattern)
+    hits_by_locus: Dict[tuple, dict] = {}
+    truncated = False
+    overlap = 20 + pam_length + 2
+    timed_out = False
+    chunk_size = max(1_000_000, ADVANCED_OFFTARGET_CHUNK_BP)
+    for contig, contig_length in _canonical_search_contigs(assembly):
+        for core_start0 in range(0, contig_length, chunk_size):
+            if time.monotonic() - started > ADVANCED_OFFTARGET_TIMEOUT:
+                truncated = timed_out = True
+                break
+            core_end0 = min(contig_length, core_start0 + chunk_size)
+            fetch_start0 = max(0, core_start0 - overlap)
+            fetch_end0 = min(contig_length, core_end0 + overlap)
+            chromosome = _load_faidx_region(
+                assembly, contig, fetch_start0 + 1, fetch_end0,
+            )
+            # A fresh searcher per chunk prevents native scratch state from
+            # accumulating across a whole-genome scan. Construction is cheap
+            # compared with reading the reference and keeps peak RSS bounded.
+            searcher = sassy.Searcher("dna", rc=True)
+            for match in searcher.search_all(query, chromosome, 2):
+                local_start0, local_end0 = int(match.text_start), int(match.text_end)
+                start0, end0 = fetch_start0 + local_start0, fetch_start0 + local_end0
+                if start0 < core_start0 or start0 >= core_end0:
+                    continue
+                reverse = match.strand == "-"
+                if reverse:
+                    pam_raw = chromosome[max(0, local_start0 - pam_length):local_start0].decode("ascii")
+                    pam = _revcomp(pam_raw)
+                else:
+                    pam = chromosome[local_end0:local_end0 + pam_length].decode("ascii")
+                if not _pam_ok(pam, pam_pattern):
+                    continue
+                raw_match = chromosome[local_start0:local_end0].decode("ascii")
+                matched = _revcomp(raw_match) if reverse else raw_match
+                try:
+                    alignment = _sassy_alignment(spacer, matched, match.cigar)
+                except (IndexError, ValueError):
+                    continue
+                hit = {
+                    "chrom": contig,
+                    "pos": start0 + 1,
+                    "protoEnd": end0,
+                    "strand": match.strand,
+                    "mm": int(match.cost),
+                    "cost": int(match.cost),
+                    "pam": pam,
+                    "sequence": matched,
+                    "cigar": match.cigar,
+                    **alignment,
+                }
+                locus_key = (contig, start0, end0, match.strand)
+                previous = hits_by_locus.get(locus_key)
+                if previous is None or (hit["cost"], bool(hit["bulgeType"])) < (previous["cost"], bool(previous["bulgeType"])):
+                    hits_by_locus[locus_key] = hit
+            del chromosome
+        if timed_out:
+            break
+
+    all_hits = sorted(hits_by_locus.values(), key=lambda hit: _advanced_hit_sort_key(hit, req.guide))
+    counts = {str(distance): sum(hit["cost"] == distance for hit in all_hits) for distance in range(3)}
+    off_targets = [
+        hit for hit in all_hits
+        if not _same_locus(hit["chrom"], hit["pos"], req.guide)
+    ][:ADVANCED_OFFTARGET_MAX_RESULTS]
+    for hit in off_targets:
+        hit["nearestGene"] = _nearest_gene(assembly, hit["chrom"], hit["pos"], hit["protoEnd"])
+        hit["annotation"] = _offtarget_feature_context(
+            assembly, hit["chrom"], hit["pos"], hit["protoEnd"],
+        )
+    payload = {
+        "available": True,
+        "counts": counts,
+        "unique": counts["0"] <= 1 and counts["1"] == 0 and counts["2"] == 0,
+        "top": off_targets,
+        "advanced": True,
+        "truncated": truncated or len(all_hits) - sum(
+            _same_locus(hit["chrom"], hit["pos"], req.guide) for hit in all_hits
+        ) > ADVANCED_OFFTARGET_MAX_RESULTS,
+        "elapsedMs": round((time.monotonic() - started) * 1000),
+        "detail": None,
+    }
+    with _advanced_offtarget_cache_lock:
+        _advanced_offtarget_cache[cache_key] = payload
+        _advanced_offtarget_cache.move_to_end(cache_key)
+        while len(_advanced_offtarget_cache) > max(1, ADVANCED_OFFTARGET_CACHE_SIZE):
+            _advanced_offtarget_cache.popitem(last=False)
+    return payload
 
 
 def _offtarget_cache_key(assembly: str, pam: str, guide: dict) -> tuple:
@@ -1454,4 +1747,3 @@ def _faidx_batch(faidx: Path, regions: list) -> Dict[str, str]:
     if name is not None:
         out[name] = "".join(buf)
     return out
-

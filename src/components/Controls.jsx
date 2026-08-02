@@ -26,11 +26,22 @@ export default function Controls({
 }) {
   const searchRef = useRef(null)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
+  const [theme, setTheme] = useState(() => {
+    const saved = window.localStorage.getItem('retroedit:theme')
+    if (saved === 'dark' || saved === 'light') return saved
+    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  })
   const customPositionRef = useRef(null)
   const [suggestions, setSuggestions] = useState([])
   const [suggestionsOpen, setSuggestionsOpen] = useState(false)
   const [activeSuggestion, setActiveSuggestion] = useState(-1)
 
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    document.documentElement.style.colorScheme = theme
+    window.localStorage.setItem('retroedit:theme', theme)
+  }, [theme])
 
   useEffect(() => {
     const term = query.trim()
@@ -134,11 +145,11 @@ export default function Controls({
             ))}
           </select>
           <div className="customuploadwrap">
-            <label className="customupload" title="FASTA or plain DNA; multi-record FASTA supported. The uploaded file stays only in this browser tab and is never stored server-side. RS3 sends only transient 30-nt guide contexts for scoring. Maximum 25 MB.">
+            <label className="customupload" title="FASTA, plain DNA, or SnapGene .dna; multi-record FASTA is supported and SnapGene features are imported. The uploaded file stays only in this browser tab and is never stored server-side. RS3 sends only transient 30-nt guide contexts for scoring. Maximum 25 MB.">
               <span>Upload Sequence</span><small>browser only</small>
               <input
                 type="file"
-                accept=".fa,.fasta,.fna,.fas,.txt,text/plain"
+                accept=".dna,.fa,.fasta,.fna,.fas,.txt,application/octet-stream,text/plain"
                 disabled={loading || !!uploadProgress}
                 onChange={(event) => {
                   const file = event.target.files?.[0]
@@ -160,7 +171,7 @@ export default function Controls({
                 <span>Record</span>
                 <select value={customRecord} onChange={(event) => onCustomRecord(event.target.value)} disabled={loading}>
                   {customRecords.map((record) => (
-                    <option key={record.name} value={record.name}>{record.name} · {record.length.toLocaleString()} bp</option>
+                    <option key={record.name} value={record.name}>{record.name} · {record.length.toLocaleString()} bp{record.features?.length ? ` · ${record.features.length.toLocaleString()} features` : ''}</option>
                   ))}
                 </select>
               </label>
@@ -258,9 +269,12 @@ export default function Controls({
                       onMouseEnter={() => setActiveSuggestion(index)}
                       onClick={() => chooseSuggestion(suggestion)}
                     >
-                      <span>
-                        <strong>{primaryLabel}</strong>
-                        {secondaryLabel && <code>{secondaryLabel}</code>}
+                      <span className="genesuggestionidentity">
+                        <span>
+                          <strong>{primaryLabel}</strong>
+                          {secondaryLabel && <code>{secondaryLabel}</code>}
+                        </span>
+                        {suggestion.description && <em>{suggestion.description}</em>}
                       </span>
                       <small>chr{chrom}:{suggestion.start.toLocaleString()}–{suggestion.end.toLocaleString()}</small>
                     </li>
@@ -301,7 +315,7 @@ export default function Controls({
           <section className="uploadprogressmodal" role="dialog" aria-modal="true" aria-labelledby="upload-progress-title">
             <div className="uploadprogressicon" aria-hidden="true">DNA</div>
             <div>
-              <h2 id="upload-progress-title">{uploadProgress.phase === 'parsing' ? 'Preparing FASTA records…' : `Reading ${uploadProgress.name}`}</h2>
+              <h2 id="upload-progress-title">{uploadProgress.phase === 'parsing' ? 'Preparing sequence and annotations…' : `Reading ${uploadProgress.name}`}</h2>
               <p>{uploadProgress.phase === 'parsing'
                 ? 'Validating sequences and building the record list in this browser.'
                 : `${formatBytes(uploadProgress.loaded)} of ${formatBytes(uploadProgress.total)} · ${uploadPercent}%`}</p>
@@ -313,7 +327,18 @@ export default function Controls({
           </section>
         </div>
       )}
-      <details className="shortcuthelp" open={shortcutsOpen}>
+      <div className="navutilities" aria-label="Display and help controls">
+        <button type="button" className="themetoggle" aria-pressed={theme === 'dark'}
+          aria-label={theme === 'dark' ? 'Use light mode' : 'Use dark mode'}
+          title={theme === 'dark' ? 'Use light mode' : 'Use dark mode'}
+          onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}>
+          {theme === 'dark' ? (
+            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.5"/><path d="M10 1.8v2M10 16.2v2M1.8 10h2M16.2 10h2M4.2 4.2l1.4 1.4M14.4 14.4l1.4 1.4M15.8 4.2l-1.4 1.4M5.6 14.4l-1.4 1.4"/></svg>
+          ) : (
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M15.8 12.7A6.6 6.6 0 0 1 7.3 4.2 6.7 6.7 0 1 0 15.8 12.7Z"/></svg>
+          )}
+        </button>
+        <details className="shortcuthelp" open={shortcutsOpen}>
         <summary
           aria-label={shortcutsOpen ? 'Close keyboard shortcuts' : 'Open keyboard shortcuts'}
           aria-expanded={shortcutsOpen}
@@ -331,6 +356,7 @@ export default function Controls({
             <div><dt><kbd>Ctrl/⌘ ⇧ Z</kbd></dt><dd>Redo an edit</dd></div>
             <div><dt><kbd>Ctrl/⌘ F</kbd></dt><dd>Find a DNA sequence</dd></div>
             <div><dt><kbd>Ctrl/⌘ C</kbd></dt><dd>Copy highlighted DNA or the guide clicked in the sequence viewer</dd></div>
+            <div><dt><kbd>Ctrl/⌘ V</kbd></dt><dd>Paste DNA at the cursor or replace the selected bases</dd></div>
             <div><dt><button type="button" className="shortcutkey" onClick={focusLocusSearch}><kbd>/</kbd></button></dt><dd>Focus locus search</dd></div>
             <div><dt><button type="button" className="shortcutkey" onClick={clearSequenceSelection}><kbd>Esc</kbd></button></dt><dd>Clear sequence selection</dd></div>
           </dl>
@@ -346,7 +372,8 @@ export default function Controls({
             </section>
           )}
         </div>
-      </details>
+        </details>
+      </div>
     </form>
   )
 }

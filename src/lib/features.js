@@ -34,6 +34,11 @@ export function buildFeatureItems({ raw, opts, dispStart, dispEnd, refStart, ref
 
   const items = []
 
+  for (const feature of raw.custom ?? []) {
+    if (!inWin(feature)) continue
+    items.push({ ...feature, ...toDS(feature), level: 'imported' })
+  }
+
   if (levels.gene) {
     for (const g of raw.genes) {
       if (!inWin(g) || !passBiotype(g.biotype)) continue

@@ -33,6 +33,28 @@ export function synonymousCodons(codon) {
   return SYNONYMS[aa].filter((c) => c !== codon)
 }
 
+/** Return every codon for `aminoAcid`, ranked by edit distance then name. */
+export function codonsForAminoAcid(currentCodon, aminoAcid) {
+  const current = String(currentCodon ?? '').toUpperCase()
+  const aa = String(aminoAcid ?? '').toUpperCase()
+  const codons = SYNONYMS[aa] ?? []
+  if (current.length !== 3 || !codons.length) return []
+  return codons.map((codon) => ({
+    codon,
+    distance: [...codon].reduce((total, base, index) => total + Number(base !== current[index]), 0),
+  })).sort((a, b) => a.distance - b.distance || a.codon.localeCompare(b.codon))
+}
+
+/**
+ * Return only the lowest-edit codon(s). Retained for callers that need a strict
+ * minimum while the interactive editor uses the complete ranked list above.
+ */
+export function nearestCodonsForAminoAcid(currentCodon, aminoAcid) {
+  const ranked = codonsForAminoAcid(currentCodon, aminoAcid)
+  if (!ranked.length) return []
+  return ranked.filter((item) => item.distance === ranked[0].distance)
+}
+
 /**
  * A per-reference-index reading-frame map for one transcript.
  *

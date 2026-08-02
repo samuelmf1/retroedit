@@ -24,6 +24,10 @@ export default function DonorPanel({
   const closePlasmid = useCallback(() => setPlasmidOpen(false), [])
   const [copied, setCopied] = useState(null)
   const [lengthDraft, setLengthDraft] = useState('')
+  const [cloningExportOpen, setCloningExportOpen] = useState(false)
+  const [cloningOverhangs, setCloningOverhangs] = useState({
+    top: '', bottom: '', includeBottom: true, namePattern: '{guide}_{strand}',
+  })
 
   if (!guide) {
     return (
@@ -35,8 +39,25 @@ export default function DonorPanel({
             <button type="button" className="plasmidopen" disabled>View plasmid map</button>
             <button type="button" className="libraryadd" disabled>+ Add to basket</button>
           </div>
-          <ExportActions count={libraryCount} onExport={onExport} />
+          <ExportActions count={libraryCount} onExport={onExport} onCloningExport={() => setCloningExportOpen(true)} />
         </div>
+        {cloningExportOpen && (
+          <CloningExportDialog
+            count={libraryCount}
+            overhangs={cloningOverhangs}
+            onChange={setCloningOverhangs}
+            onClose={() => setCloningExportOpen(false)}
+            onExport={() => {
+              onExport('idt-cloning', {
+                topOverhang: cloningOverhangs.top,
+                bottomOverhang: cloningOverhangs.bottom,
+                includeBottom: cloningOverhangs.includeBottom,
+                namePattern: cloningOverhangs.namePattern,
+              })
+              setCloningExportOpen(false)
+            }}
+          />
+        )}
       </section>
     )
   }
@@ -165,10 +186,11 @@ export default function DonorPanel({
                 <label>
                   <span>Alternative PAM/seed disrupting mutations</span>
                   <select
-                    value={donor.blocking.manual ? blockingChoice : ''}
-                    onChange={(event) => onBlockingChoice(event.target.value || null)}
+                    value={donor.blocking.manual ? blockingChoice : donor.blocking.recommendedKey}
+                    onChange={(event) => onBlockingChoice(
+                      event.target.value === donor.blocking.recommendedKey ? null : event.target.value,
+                    )}
                   >
-                    <option value="">Automatic (recommended)</option>
                     {donor.blocking.options.map((option) => (
                       <option key={option.key} value={option.key} disabled={!option.selectable}>
                         {blockingOptionLabel(option, reference.start, donor.blocking.recommendedKey)}
@@ -195,8 +217,7 @@ export default function DonorPanel({
 
           {donor.proof && (
             <div className="proof">
-              protein unchanged across affected codons:
-              <code>{donor.proof.ref}</code> to <code>{donor.proof.donor}</code>
+              <strong>Protein consequence:</strong> none (silent mutation).
             </div>
           )}
 
@@ -223,8 +244,25 @@ export default function DonorPanel({
           </button>
           {!guide.metricsReady && <span className="librarynote">Available when guide metrics finish</span>}
         </div>
-        <ExportActions count={libraryCount} onExport={onExport} />
+        <ExportActions count={libraryCount} onExport={onExport} onCloningExport={() => setCloningExportOpen(true)} />
       </div>
+      {cloningExportOpen && (
+        <CloningExportDialog
+          count={libraryCount}
+          overhangs={cloningOverhangs}
+          onChange={setCloningOverhangs}
+          onClose={() => setCloningExportOpen(false)}
+          onExport={() => {
+            onExport('idt-cloning', {
+              topOverhang: cloningOverhangs.top,
+              bottomOverhang: cloningOverhangs.bottom,
+              includeBottom: cloningOverhangs.includeBottom,
+              namePattern: cloningOverhangs.namePattern,
+            })
+            setCloningExportOpen(false)
+          }}
+        />
+      )}
       {plasmidOpen && (
         <Suspense fallback={(
           <div className="plasmidmodal" role="dialog" aria-modal="true" aria-label="Loading plasmid viewer">
@@ -246,12 +284,125 @@ export default function DonorPanel({
   )
 }
 
-function ExportActions({ count, onExport }) {
+function ExportActions({ count, onExport, onCloningExport }) {
+  const chooseExport = (event, action) => {
+    event.currentTarget.closest('details')?.removeAttribute('open')
+    action()
+  }
+
   return (
     <div className="donorexports">
       <span>{count} in basket</span>
-      <button type="button" disabled={!count} onClick={() => onExport('fasta')}>FASTA</button>
-      <button type="button" disabled={!count} onClick={() => onExport('tsv')}>TSV</button>
+      <details className="donorexportmenu" name="donor-export-menu">
+        <summary aria-label="Download design files">Download <i aria-hidden="true" /></summary>
+        <div className="donorexportoptions" role="menu" aria-label="Download design files">
+          <button type="button" role="menuitem" disabled={!count}
+            onClick={(event) => chooseExport(event, () => onExport('fasta'))}>
+            <span>FASTA</span><small>Sequence records</small>
+          </button>
+          <button type="button" role="menuitem" disabled={!count}
+            onClick={(event) => chooseExport(event, () => onExport('tsv'))}>
+            <span>TSV</span><small>Design table</small>
+          </button>
+          <button type="button" role="menuitem" disabled={!count}
+            title="Annotated SnapGene file containing the edited locus and every design in the basket"
+            onClick={(event) => chooseExport(event, () => onExport('dna'))}>
+            <span>SnapGene .dna</span><small>Annotated design</small>
+          </button>
+        </div>
+      </details>
+      <details className="donorexportmenu" name="donor-export-menu">
+        <summary aria-label="Export files for ordering">Order <i aria-hidden="true" /></summary>
+        <div className="donorexportoptions orderoptions" role="menu" aria-label="Export files for ordering">
+          <button type="button" role="menuitem" disabled={!count}
+            title="IDT bulk-entry CSV: full guide RNA using the selected tracrRNA scaffold; PAM excluded"
+            onClick={(event) => chooseExport(event, () => onExport('idt-grna'))}>
+            <span>IDT gRNA</span><small>Full guide RNA CSV</small>
+          </button>
+          <button type="button" role="menuitem" disabled={!count}
+            title="Paired spacer oligos with custom 5′ cloning overhangs"
+            onClick={(event) => chooseExport(event, onCloningExport)}>
+            <span>Cloning oligos</span><small>Configure strands and overhangs</small>
+          </button>
+          <button type="button" role="menuitem" disabled={!count}
+            title="IDT gBlocks bulk-entry CSV: Name and repair-template Sequence. IDT accepts gBlocks from 125 to 3,000 bp."
+            onClick={(event) => chooseExport(event, () => onExport('idt-gblocks'))}>
+            <span>gBlocks</span><small>Repair-template CSV</small>
+          </button>
+        </div>
+      </details>
+    </div>
+  )
+}
+
+function CloningExportDialog({ count, overhangs, onChange, onClose, onExport }) {
+  const invalidTop = /[^ACGT]/i.test(overhangs.top)
+  const invalidBottom = overhangs.includeBottom && /[^ACGT]/i.test(overhangs.bottom)
+  const emptyName = !overhangs.namePattern.trim()
+  const duplicateStrands = overhangs.includeBottom && !overhangs.namePattern.includes('{strand}')
+  const duplicateGuides = count > 1 && !overhangs.namePattern.includes('{guide}') && !overhangs.namePattern.includes('{index}')
+  const invalid = invalidTop || invalidBottom || emptyName || duplicateStrands || duplicateGuides
+  const update = (key, value) => onChange({ ...overhangs, [key]: value.toUpperCase().replace(/\s+/g, '') })
+  const previewName = (strand) => overhangs.namePattern
+    .replaceAll('{guide}', 'fwd_chr11_5227002')
+    .replaceAll('{index}', '1')
+    .replaceAll('{strand}', strand)
+
+  return (
+    <div className="spacermatchbackdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose()
+    }}>
+      <section className="loadconfirmmodal cloningexportmodal" role="dialog" aria-modal="true"
+        aria-labelledby="cloning-export-title">
+        <div className="cloningexporthead">
+          <div>
+            <div className="loadconfirmbrand">IDT cloning oligos</div>
+            <h2 id="cloning-export-title">Add custom overhangs</h2>
+          </div>
+          <button type="button" className="spacermatchclose" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <p>Exports a forward spacer oligo for every guide in the basket, with an optional reverse-complement bottom strand. Enter only the 5′ cloning overhang for each oligo.</p>
+        <label className="cloningnamefield">
+          <span>Oligo name or prefix pattern</span>
+          <input value={overhangs.namePattern}
+            onChange={(event) => onChange({ ...overhangs, namePattern: event.target.value })}
+            placeholder="{guide}_{strand}" maxLength="120" />
+          <small>
+            Use <code>{'{guide}'}</code>, <code>{'{index}'}</code>, and <code>{'{strand}'}</code>. Example: {previewName('top')}
+          </small>
+        </label>
+        <div className="cloningoverhangfields">
+          <label>
+            <span>Top oligo 5′ overhang</span>
+            <input value={overhangs.top} onChange={(event) => update('top', event.target.value)}
+              placeholder="e.g. CACC" maxLength="40" autoFocus aria-invalid={invalidTop} />
+            <small><b>5′–{overhangs.top || 'OVERHANG'}</b> + spacer–3′</small>
+          </label>
+          <div className="cloningbottomoption">
+            <label className="cloningbottomtoggle">
+              <input type="checkbox" checked={overhangs.includeBottom}
+                onChange={(event) => onChange({ ...overhangs, includeBottom: event.target.checked })} />
+              <span>Include bottom-strand oligo</span>
+            </label>
+            {overhangs.includeBottom && (
+              <label>
+                <span>Bottom oligo 5′ overhang</span>
+                <input value={overhangs.bottom} onChange={(event) => update('bottom', event.target.value)}
+                  placeholder="e.g. AAAC" maxLength="40" aria-invalid={invalidBottom} />
+                <small><b>5′–{overhangs.bottom || 'OVERHANG'}</b> + reverse-complement spacer–3′</small>
+              </label>
+            )}
+          </div>
+        </div>
+        {(invalidTop || invalidBottom) && <div className="cloningoverhangerror" role="alert">Overhangs may contain only A, C, G, and T.</div>}
+        {emptyName && <div className="cloningoverhangerror" role="alert">Enter an oligo name pattern.</div>}
+        {duplicateStrands && <div className="cloningoverhangerror" role="alert">Add {'{strand}'} so top and bottom oligos have unique names.</div>}
+        {duplicateGuides && <div className="cloningoverhangerror" role="alert">Add {'{guide}'} or {'{index}'} so each guide has a unique name.</div>}
+        <div className="loadconfirmactions">
+          <button type="button" onClick={onClose}>Cancel</button>
+          <button type="button" className="primary" disabled={invalid} onClick={onExport}>Export IDT CSV</button>
+        </div>
+      </section>
     </div>
   )
 }

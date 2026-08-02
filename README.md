@@ -47,9 +47,9 @@ donors still designed, but the RS3 column shows `off`.
 
 ## Custom DNA uploads
 
-Users can upload FASTA or plain DNA containing up to 10,000 IUPAC nucleotide bases. The full sequence is held only in browser memory and is released when the page is closed or reloaded; it is never uploaded or written to server storage. RuleSet3 receives only the 30-base guide contexts needed for scoring, with server caching disabled for custom sequences.
+Users can upload plain DNA, single- or multi-record FASTA, or SnapGene `.dna` files up to 25 MB. SnapGene feature colors and CDS ranges are imported into the sequence viewer; CDS annotations also enable codon, amino-acid, and stop-codon context. The full uploaded file and sequence stay only in browser memory and are released when the page is closed or reloaded—they are never uploaded or written to server storage. Rule Set 3 receives only transient 30-base guide contexts for scoring, with server caching disabled for custom sequences.
 
-Custom mode retains sequence editing, local guide discovery, RuleSet3 scoring, HDR donor design, and export. Reference-dependent features—gene/transcript/CDS annotations, codons, locus navigation, gnomAD, ClinVar, flanking-sequence extension, and genome-wide off-target counts—are omitted.
+Custom mode retains sequence editing, imported and user-created annotations, local guide discovery and off-target search, Rule Set 3 scoring, HDR repair-template design, and export. User annotations can be downloaded with the edited sequence as a SnapGene `.dna` file. Reference-database features such as locus navigation, gnomAD, and ClinVar are omitted.
 
 ## Production
 

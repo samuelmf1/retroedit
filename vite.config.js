@@ -5,6 +5,11 @@ import react from '@vitejs/plugin-react'
 // browser sees a single origin.
 export default defineConfig({
   plugins: [react()],
+  build: {
+    // Keep fingerprinted chunks from recent builds so browser tabs that were
+    // already open during a deployment can finish loading lazy features.
+    emptyOutDir: false,
+  },
   server: {
     host: '0.0.0.0',
     port: 8000,

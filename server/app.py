@@ -72,6 +72,7 @@ async def limit_expensive_request_bodies(request: Request, call_next):
     if request.method == "POST" and request.url.path in {
         "/api/score",
         "/api/genomics/offtargets",
+        "/api/genomics/offtargets-advanced",
         "/api/genomics/spacer-matches",
     }:
         try:
@@ -85,6 +86,7 @@ async def limit_expensive_request_bodies(request: Request, call_next):
             )
     if request.method == "POST" and request.url.path in {
         "/api/genomics/offtargets",
+        "/api/genomics/offtargets-advanced",
         "/api/genomics/spacer-matches",
     }:
         async with _offtarget_gate:

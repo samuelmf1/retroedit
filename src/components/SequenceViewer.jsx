@@ -14,6 +14,9 @@ import { complementBase } from '../lib/bio.js'
 import { baseStatus } from '../lib/editModel.js'
 import { clinvarCategory } from '../lib/variants.js'
 
+const MIN_NEARBY_OVERVIEW_BP = 10_001
+const MAX_NEARBY_OVERVIEW_BP = 1_000_001
+
 function featureTooltip(f) {
   const lines = [f.name]
   if (f.id && f.id !== f.name) lines.push(f.id)
@@ -91,6 +94,7 @@ const ROW_GAP = 22
 const GUTTER = 18
 const MIN_BPR = 30
 const MAX_BPR = 240
+const FIXED_BPR = 100
 const MAX_FEATURE_LANES = 32
 const OVERSCAN = 4
 const MIN_OVERVIEW_BP = 100
@@ -162,6 +166,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     locusOverview,
     overviewTarget,
     edited,
+    lineMode = "window",
     guideItems,
     featureItems,
     guideRibbon,
@@ -169,6 +174,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     cutColumn,
     tss,
     codonCells,
+    onAminoAcidEdit,
     variantItems,
     focusSpan,
     emphasizedEdit,
@@ -176,6 +182,10 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     junctions,
     caret,
     selection,
+    featureSelection,
+    onAddFeature,
+    onEditFeature,
+    onDeleteFeature,
     sequenceSearch,
     searchMatches = [],
     searchMatchIndex = 0,
@@ -193,13 +203,17 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     onExtendRight,
     extensionDisabled,
     onKeyDown,
+    onPaste,
   },
   ref,
 ) {
   const scrollRef = useRef(null)
   const overviewTrackRef = useRef(null)
   const [scrollTop, setScrollTop] = useState(0)
+  const [featureMenu, setFeatureMenu] = useState(null)
+  const [scrollLeft, setScrollLeft] = useState(0)
   const [viewportH, setViewportH] = useState(600)
+  const [viewportW, setViewportW] = useState(900)
   const [bpr, setBpr] = useState(60)
   const [overviewDragPercent, setOverviewDragPercent] = useState(null)
   const [overviewResizeRange, setOverviewResizeRange] = useState(null)
@@ -209,11 +223,13 @@ const SequenceViewer = forwardRef(function SequenceViewer(
   const overviewDragging = useRef(false)
   const overviewResizing = useRef(null)
   const overviewPinch = useRef(null)
+  const overviewZoomCommitTimer = useRef(null)
+  const pendingOverviewZoomRange = useRef(null)
   const variantTipCloseTimer = useRef(null)
   const cancelVariantTipClose = useCallback(() => {
     window.clearTimeout(variantTipCloseTimer.current)
     variantTipCloseTimer.current = null
-  }, [])
+  }, [lineMode])
   const showVariantTip = useCallback((v, x, y) => {
     cancelVariantTipClose()
     setVariantTip({ v, x, y })
@@ -234,12 +250,17 @@ const SequenceViewer = forwardRef(function SequenceViewer(
       // Fill the available width (minus gutters) so no gap opens beside the sidebar.
       const w = entry.contentRect.width - GUTTER * 2
       const fit = Math.floor(w / CHAR_W)
-      setBpr(Math.max(MIN_BPR, Math.min(fit, MAX_BPR)))
+      setBpr(lineMode === 'single'
+        ? Math.max(1, len)
+        : lineMode === 'fixed'
+          ? FIXED_BPR
+          : Math.max(MIN_BPR, Math.min(fit, MAX_BPR)))
       setViewportH(entry.contentRect.height)
+      setViewportW(entry.contentRect.width)
     })
     ro.observe(el)
     return () => ro.disconnect()
-  }, [])
+  }, [lineMode, len])
 
   const rowCount = Math.max(1, Math.ceil(len / bpr))
 
@@ -322,29 +343,51 @@ const SequenceViewer = forwardRef(function SequenceViewer(
 
   const totalH = layout.offsets[rowCount]
 
-  const [firstRow, lastRow] = useMemo(() => {
+  const rowAtScrollPosition = useCallback((y) => {
     const { offsets } = layout
-    const find = (y) => {
-      let lo = 0
-      let hi = rowCount - 1
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1
-        if (offsets[mid + 1] <= y) lo = mid + 1
-        else hi = mid
-      }
-      return lo
+    let lo = 0
+    let hi = rowCount - 1
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (offsets[mid + 1] <= y) lo = mid + 1
+      else hi = mid
     }
-    return [
-      Math.max(0, find(scrollTop) - OVERSCAN),
-      Math.min(rowCount - 1, find(scrollTop + viewportH) + OVERSCAN),
-    ]
-  }, [layout, scrollTop, viewportH, rowCount])
+    return lo
+  }, [layout, rowCount])
+
+  const [firstRow, lastRow] = useMemo(() => [
+    Math.max(0, rowAtScrollPosition(scrollTop) - OVERSCAN),
+    Math.min(rowCount - 1, rowAtScrollPosition(scrollTop + viewportH) + OVERSCAN),
+  ], [rowAtScrollPosition, scrollTop, viewportH, rowCount])
+
+  const overviewViewportStyle = useMemo(() => {
+    if (!len) return null
+    let start
+    let end
+    if (lineMode === 'single') {
+      start = Math.max(0, Math.min(len, Math.floor((scrollLeft - GUTTER) / CHAR_W)))
+      end = Math.max(start, Math.min(len, Math.ceil((scrollLeft + viewportW - GUTTER) / CHAR_W)))
+    } else {
+      const visibleFirstRow = rowAtScrollPosition(scrollTop)
+      const visibleLastRow = rowAtScrollPosition(Math.max(scrollTop, scrollTop + viewportH - 1))
+      start = Math.max(0, Math.min(len, visibleFirstRow * bpr))
+      end = Math.max(start, Math.min(len, (visibleLastRow + 1) * bpr))
+    }
+    return {
+      left: String((start / len) * 100) + '%',
+      width: String(Math.max(0.8, ((end - start) / len) * 100)) + '%',
+    }
+  }, [bpr, len, lineMode, rowAtScrollPosition, scrollLeft, scrollTop, viewportH, viewportW])
 
   useImperativeHandle(ref, () => ({
     focus: () => scrollRef.current?.focus(),
     scrollToIndex(index, behavior = 'smooth') {
       const el = scrollRef.current
       if (!el) return
+      if (lineMode === 'single') {
+        el.scrollTo({ left: Math.max(0, GUTTER + index * CHAR_W - el.clientWidth / 3), behavior })
+        return
+      }
       const row = Math.floor(index / bpr)
       const y = layout.offsets[row] - el.clientHeight / 3
       el.scrollTo({ top: Math.max(0, y), behavior })
@@ -352,11 +395,15 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     scrollToIndexCentered(index, behavior = 'smooth') {
       const el = scrollRef.current
       if (!el) return
+      if (lineMode === 'single') {
+        el.scrollTo({ left: Math.max(0, GUTTER + index * CHAR_W - el.clientWidth / 2), behavior })
+        return
+      }
       const row = Math.max(0, Math.min(rowCount - 1, Math.floor(index / bpr)))
       const rowCenter = layout.offsets[row] + layout.heights[row] / 2
       el.scrollTo({ top: Math.max(0, rowCenter - el.clientHeight / 2), behavior })
     },
-  }), [bpr, layout, rowCount])
+  }), [bpr, layout, lineMode, rowCount])
 
   const boundaryAt = useCallback((event, rowStart) => {
     const rect = event.currentTarget.getBoundingClientRect()
@@ -397,6 +444,32 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     onCaretChange(end)
     scrollRef.current?.focus({ preventScroll: true })
   }, [len, onCaretChange, onSelectionChange])
+
+  const openFeatureMenu = useCallback((event, feature) => {
+    if (feature.level !== 'custom' || (!onEditFeature && !onDeleteFeature)) return
+    const rect = event.currentTarget.getBoundingClientRect()
+    const menuWidth = 210
+    const left = Math.max(10, Math.min(window.innerWidth - menuWidth - 10, rect.left))
+    const below = rect.bottom + 7
+    const top = below + 132 < window.innerHeight ? below : Math.max(10, rect.top - 132)
+    setFeatureMenu({ feature, left, top })
+  }, [onDeleteFeature, onEditFeature])
+
+  useEffect(() => {
+    if (!featureMenu) return undefined
+    const dismiss = (event) => {
+      if (!event.target.closest?.('.featureactionmenu')) setFeatureMenu(null)
+    }
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setFeatureMenu(null)
+    }
+    document.addEventListener('pointerdown', dismiss)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', dismiss)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [featureMenu])
 
   useEffect(() => {
     const stop = () => { dragging.current = false }
@@ -516,7 +589,24 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     }
 
     return {
-      exons: locusOverview.exons.map((exon, index) => ({ exon, index, style: segment(exon.start, exon.end) })).filter((item) => item.style),
+      exons: locusOverview.exons.map((exon, index) => {
+        const style = segment(exon.start, exon.end)
+        if (!style) return null
+        const exonLeft = parseFloat(style.left)
+        const exonWidth = parseFloat(style.width)
+        const codingBoxes = (locusOverview.coding ?? [])
+          .filter((coding) => coding.end >= exon.start && coding.start <= exon.end)
+          .map((coding) => segment(
+            Math.max(exon.start, coding.start),
+            Math.min(exon.end, coding.end),
+          ))
+          .filter(Boolean)
+          .map((codingStyle) => ({
+            left: `${Math.max(0, ((parseFloat(codingStyle.left) - exonLeft) / exonWidth) * 100)}%`,
+            width: `${Math.min(100, (parseFloat(codingStyle.width) / exonWidth) * 100)}%`,
+          }))
+        return { exon, index, style, codingBoxes }
+      }).filter(Boolean),
       elements,
       laneCount: Math.max(1, laneEnds.length),
       window: segment(reference.start, reference.end),
@@ -559,12 +649,61 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     return { percent, position }
   }, [locusOverview])
 
+  const sequenceOverviewRange = useCallback((factor, baseRange = null) => {
+    if (!locusOverview) return null
+    const base = baseRange ?? { start: reference.start, end: reference.end }
+    const overviewSpan = locusOverview.end - locusOverview.start + 1
+    const baseWidth = base.end - base.start + 1
+    const width = Math.max(MIN_OVERVIEW_BP, Math.min(overviewSpan, Math.round(baseWidth * factor)))
+    const center = (base.start + base.end) / 2
+    let start = Math.round(center - (width - 1) / 2)
+    let end = start + width - 1
+    if (start < locusOverview.start) {
+      start = locusOverview.start
+      end = start + width - 1
+    }
+    if (end > locusOverview.end) {
+      end = locusOverview.end
+      start = end - width + 1
+    }
+    return { start, end }
+  }, [locusOverview, reference.end, reference.start])
+
+  const commitSequenceOverviewZoom = useCallback((range, delay = 0) => {
+    if (!range || !onOverviewResize) return
+    window.clearTimeout(overviewZoomCommitTimer.current)
+    pendingOverviewZoomRange.current = range
+    setOverviewResizeRange(range)
+    overviewZoomCommitTimer.current = window.setTimeout(() => {
+      pendingOverviewZoomRange.current = null
+      setOverviewResizeRange(null)
+      onOverviewResize(range.start, range.end)
+    }, delay)
+  }, [onOverviewResize])
+
+  useEffect(() => () => window.clearTimeout(overviewZoomCommitTimer.current), [])
+
+  const handleOverviewZoomPress = useCallback((factor) => {
+    if (broadOverview) {
+      onOverviewZoom?.(factor)
+      return
+    }
+    const range = sequenceOverviewRange(factor)
+    if (range) commitSequenceOverviewZoom(range)
+  }, [broadOverview, commitSequenceOverviewZoom, onOverviewZoom, sequenceOverviewRange])
+
   const handleOverviewWheel = useCallback((event) => {
-    if (!event.ctrlKey || !broadOverview || overviewDisabled || !onOverviewZoom) return
+    if (!event.ctrlKey || overviewDisabled) return
+    if (broadOverview ? !onOverviewZoom : !onOverviewResize) return
     event.preventDefault()
     const factor = Math.exp(Math.max(-80, Math.min(80, event.deltaY)) * 0.008)
-    onOverviewZoom(factor)
-  }, [broadOverview, onOverviewZoom, overviewDisabled])
+    if (broadOverview) {
+      onOverviewZoom(factor)
+      return
+    }
+    const range = sequenceOverviewRange(factor, pendingOverviewZoomRange.current)
+    if (range) commitSequenceOverviewZoom(range, 140)
+  }, [broadOverview, commitSequenceOverviewZoom, onOverviewResize, onOverviewZoom, overviewDisabled, sequenceOverviewRange])
 
   useEffect(() => {
     const track = overviewTrackRef.current
@@ -591,17 +730,23 @@ const SequenceViewer = forwardRef(function SequenceViewer(
   }, [locusOverview, reference.end, reference.start])
 
   const handleOverviewTouchStart = useCallback((event) => {
-    if (!broadOverview || overviewDisabled || !onOverviewZoom || event.touches.length !== 2) return
+    if (overviewDisabled || event.touches.length !== 2) return
+    if (broadOverview ? !onOverviewZoom : !onOverviewResize) return
     const [first, second] = event.touches
     const distance = Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY)
     overviewDragging.current = false
     overviewResizing.current = null
+    pendingOverviewZoomRange.current = null
+    window.clearTimeout(overviewZoomCommitTimer.current)
     setOverviewDragPercent(null)
     setOverviewResizeRange(null)
-    overviewPinch.current = { distance: Math.max(1, distance) }
+    overviewPinch.current = {
+      distance: Math.max(1, distance),
+      range: broadOverview ? null : { start: reference.start, end: reference.end },
+    }
     event.preventDefault()
     event.stopPropagation()
-  }, [broadOverview, onOverviewZoom, overviewDisabled])
+  }, [broadOverview, onOverviewResize, onOverviewZoom, overviewDisabled, reference.end, reference.start])
 
   const handleOverviewTouchMove = useCallback((event) => {
     const pinch = overviewPinch.current
@@ -613,15 +758,25 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     ))
     const factor = pinch.distance / distance
     pinch.distance = distance
-    onOverviewZoom?.(factor)
+    if (broadOverview) {
+      onOverviewZoom?.(factor)
+    } else {
+      const range = sequenceOverviewRange(factor, pinch.range)
+      if (range) {
+        pinch.range = range
+        setOverviewResizeRange(range)
+      }
+    }
     event.preventDefault()
     event.stopPropagation()
-  }, [onOverviewZoom])
+  }, [broadOverview, onOverviewZoom, sequenceOverviewRange])
 
   const handleOverviewTouchEnd = useCallback((event) => {
-    if (!overviewPinch.current || event.touches.length >= 2) return
+    const pinch = overviewPinch.current
+    if (!pinch || event.touches.length >= 2) return
     overviewPinch.current = null
-  }, [])
+    if (!broadOverview && pinch.range) commitSequenceOverviewZoom(pinch.range)
+  }, [broadOverview, commitSequenceOverviewZoom])
 
   const handleOverviewPointerDown = useCallback((event) => {
     if (overviewDisabled || event.button !== 0) return
@@ -688,9 +843,16 @@ const SequenceViewer = forwardRef(function SequenceViewer(
   }, [locusOverview, onOverviewNavigate, overviewDisabled, reference.end, reference.start])
 
   const rows = []
+  const horizontalOverscanBases = 80
   for (let r = firstRow; r <= lastRow && rowCount > 0; r++) {
     const rowStart = r * bpr
     const rowEnd = Math.min(len - 1, rowStart + bpr - 1)
+    const cellStart = lineMode === 'single'
+      ? Math.max(rowStart, Math.floor((scrollLeft - GUTTER) / CHAR_W) - horizontalOverscanBases)
+      : rowStart
+    const cellEnd = lineMode === 'single'
+      ? Math.min(rowEnd, Math.ceil((scrollLeft + viewportW - GUTTER) / CHAR_W) + horizontalOverscanBases)
+      : rowEnd
     if (rowEnd < rowStart) continue
 
     const fwdLanes = layout.fwdLanes[r]
@@ -700,14 +862,20 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     const fwdChars = []
     const revChars = []
     const ticks = []
+    if (cellStart > rowStart) {
+      const spacerWidth = (cellStart - rowStart) * CHAR_W
+      fwdChars.push(<span key="virtual-start" className="basevirtualspacer" style={{ width: spacerWidth }} />)
+      revChars.push(<span key="virtual-start" className="basevirtualspacer" style={{ width: spacerWidth }} />)
+    }
 
-    for (let i = rowStart; i <= rowEnd; i++) {
+    for (let i = cellStart; i <= cellEnd; i++) {
       const rec = edited[i]
       const status = baseStatus(rec, refSeq)
       const inSel = hasSelection && i >= selStart && i < selEnd
       const inEmphasizedEdit = emphasizedEdit && i >= emphasizedEdit.start && i <= emphasizedEdit.end
       const commonClasses = [
         'b', status,
+        !rec.del && !/^[ACGT]$/i.test(String(rec.base)) ? 'invalid-base' : '',
         nearMask[i] ? 'near' : '',
         inSel ? 'sel' : '',
         inEmphasizedEdit ? 'edit-focus' : '',
@@ -872,10 +1040,14 @@ const SequenceViewer = forwardRef(function SequenceViewer(
       return (
         <button type="button" key={f.id}
           className={`fbar ${f.level}${f.primary ? " primary" : ""}`}
-          style={{ ...box, top }} title={`${tip}\nClick to select this DNA interval`}
+          style={{ ...box, top, ...(f.level === 'custom' && f.color ? { background: f.color } : {}) }}
+          title={`${tip}\n${f.level === 'custom' ? 'Click for feature actions' : 'Click to select this DNA interval'}`}
           aria-label={`${displayName}; select represented DNA interval`}
           onPointerDown={(event) => event.stopPropagation()}
-          onClick={() => handleFeatureSelect(f)}>
+          onClick={(event) => {
+            handleFeatureSelect(f)
+            openFeatureMenu(event, f)
+          }}>
           <span>{label}</span>
         </button>
       )
@@ -979,16 +1151,31 @@ const SequenceViewer = forwardRef(function SequenceViewer(
           <div className="codontrack" style={{ height: CODON_H, width: bpr * CHAR_W }}>
             {(() => {
               const cells = []
-              for (let i = rowStart; i <= rowEnd; i++) {
+              for (let i = cellStart; i <= cellEnd; i++) {
                 const p = codonCells.parity[i]
                 if (p < 0) continue
                 if (codonCells.largeDeletionMask?.[i]) continue
                 cells.push(
                   <span
                     key={i}
-                    className={`cc p${p}${codonCells.changed[i] ? ' changed' : ''}${codonCells.kind[i] ? ` ${codonCells.kind[i]}` : ''}`}
+                    className={`cc p${p}${codonCells.changed[i] ? ' changed' : ''}${codonCells.kind[i] ? ` ${codonCells.kind[i]}` : ''}${codonCells.editTarget?.[i] ? ' editable' : ''}`}
                     style={{ left: (i - rowStart) * CHAR_W }}
-                    title={codonCells.title[i] || undefined}
+                    title={codonCells.editTarget?.[i]
+                      ? `${codonCells.title[i]} · Click to change amino acid`
+                      : codonCells.title[i] || undefined}
+                    role={codonCells.editTarget?.[i] ? 'button' : undefined}
+                    tabIndex={codonCells.editTarget?.[i] ? 0 : undefined}
+                    aria-label={codonCells.editTarget?.[i] ? `Change amino acid ${codonCells.aa[i]}` : undefined}
+                    onClick={codonCells.editTarget?.[i] ? (event) => {
+                      event.stopPropagation()
+                      onAminoAcidEdit?.(codonCells.editTarget[i])
+                    } : undefined}
+                    onKeyDown={codonCells.editTarget?.[i] ? (event) => {
+                      if (event.key !== 'Enter' && event.key !== ' ') return
+                      event.preventDefault()
+                      event.stopPropagation()
+                      onAminoAcidEdit?.(codonCells.editTarget[i])
+                    } : undefined}
                   >
                     {codonCells.aa[i] ?? ''}
                   </span>,
@@ -1032,18 +1219,29 @@ const SequenceViewer = forwardRef(function SequenceViewer(
     : 30
   const overviewSpanBp = locusOverview ? locusOverview.end - locusOverview.start + 1 : 0
   return (
-    <div className={`viewer${selectionSummary || searchSummary ? ' has-selection' : ''}${emphasizedEdit ? ' locating-edit' : ''}`}>
+    <div className={`viewer${selectionSummary || searchSummary ? " has-selection" : ""}${emphasizedEdit ? " locating-edit" : ""}${lineMode === "fixed" ? " fixed-lines" : ""}${lineMode === "single" ? " single-line" : ""}`}>
       <div
         className="viewer-scroll"
         ref={scrollRef}
         tabIndex={0}
-        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+        onScroll={(e) => {
+          setScrollTop(e.currentTarget.scrollTop)
+          setScrollLeft(e.currentTarget.scrollLeft)
+        }}
         onKeyDown={onKeyDown}
+        onPaste={onPaste}
       >
-        <div className="canvas" style={{ height: totalH }}>{rows}</div>
+        <div className="canvas" style={{
+          height: totalH,
+          minWidth: lineMode === 'fixed'
+            ? FIXED_BPR * CHAR_W + GUTTER * 2
+            : lineMode === 'single'
+              ? Math.max(1, len) * CHAR_W + GUTTER * 2
+              : undefined,
+        }}>{rows}</div>
       </div>
       {overviewTarget && overviewGeometry && createPortal(
-        <div className="genomebar top" style={{ '--overview-track-height': `${overviewTrackHeight}px`, '--overview-height': `${overviewTrackHeight + 8}px` }}>
+        <div className={broadOverview ? "genomebar top broad" : "genomebar top"} style={{ '--overview-track-height': `${overviewTrackHeight}px`, '--overview-height': `${overviewTrackHeight + 8}px` }}>
           <div
             ref={overviewTrackRef}
             className={`genomebar-track${overviewGeometry.elements.length ? ' nearby' : ''}${overviewDragPercent == null ? '' : ' dragging'}`}
@@ -1056,7 +1254,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
             aria-label={`${locusOverview.label}, current window ${formatChrom(reference.chrom)}:${reference.start}-${reference.end}`}
             title={broadOverview
               ? 'Click or drag to move the displayed sequence window. Pinch or use −/+ to change the nearby-region scale.'
-              : 'Click or drag to move the displayed window, drag either edge to resize, or click an exon to snap.'}
+              : 'Click or drag to move the displayed window, pinch or use −/+ to zoom, drag either edge to resize, or click an exon to snap.'}
             onPointerDown={handleOverviewPointerDown}
             onPointerMove={handleOverviewPointerMove}
             onPointerUp={handleOverviewPointerUp}
@@ -1085,16 +1283,23 @@ const SequenceViewer = forwardRef(function SequenceViewer(
               <>
                 <span className={`genomebar-gene ${locusOverview.strand === -1 ? 'rev' : 'fwd'}`}
                   title={locusOverview.strand === -1 ? '− strand · transcribed right to left' : '+ strand · transcribed left to right'} />
-                {overviewGeometry.exons.map(({ exon, index, style }) => (
+                {overviewGeometry.exons.map(({ exon, index, style, codingBoxes }) => (
                   <button type="button" key={exon.id || index} className="genomebar-exon" style={style}
-                    title={`Exon ${exon.rank ?? index + 1} · click to snap`}
+                    title={`Exon ${exon.rank ?? index + 1}${codingBoxes.length ? ' · light UTR / dark CDS' : ' · noncoding'} · click to snap`}
                     onPointerDown={(event) => event.stopPropagation()}
-                    onClick={() => onOverviewExon?.(index)} />
+                    onClick={() => onOverviewExon?.(index)}>
+                    {codingBoxes.map((codingStyle, codingIndex) => (
+                      <span key={codingIndex} className="genomebar-exon-cds" style={codingStyle} />
+                    ))}
+                  </button>
                 ))}
               </>
             )}
             {overviewWindowStyle && (
               <span className={`genomebar-window${broadOverview ? ' fixed' : ''}`} style={overviewWindowStyle}>
+                {!broadOverview && overviewViewportStyle && (
+                  <span className="genomebar-viewport" style={overviewViewportStyle} aria-hidden="true" />
+                )}
                 {!broadOverview && (
                   <>
                     <span className="genomebar-resize left" data-overview-resize="start"
@@ -1106,28 +1311,38 @@ const SequenceViewer = forwardRef(function SequenceViewer(
               </span>
             )}
           </div>
-          {broadOverview && (
-            <div className="genomebar-zoom" role="group" aria-label="Zoom nearby genomic overview">
-              <button type="button" aria-label="Zoom out nearby region" title="Zoom out nearby region"
-                disabled={overviewDisabled || !onOverviewZoom || overviewSpanBp >= 10_000_001}
-                onClick={() => onOverviewZoom?.(1.5)}>
-                −
+          {(onOverviewZoom || onOverviewResize) && (
+            <div className={'genomebar-zoom' + (broadOverview ? '' : ' windowzoom')} role="group"
+              aria-label={broadOverview ? 'Zoom nearby genomic overview' : 'Zoom displayed sequence window'}>
+              <button type="button" className="zoomout"
+                aria-label={broadOverview ? 'Zoom out nearby region' : 'Zoom out sequence window'}
+                title={broadOverview ? 'Zoom out · show more surrounding DNA' : 'Zoom out · show more sequence'}
+                disabled={overviewDisabled || (broadOverview
+                  ? !onOverviewZoom || overviewSpanBp >= MAX_NEARBY_OVERVIEW_BP
+                  : !onOverviewResize || reference.end - reference.start + 1 >= overviewSpanBp)}
+                onClick={() => handleOverviewZoomPress(1.5)}>
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <circle cx="8" cy="8" r="5"/><path d="m12 12 5 5M5.5 8h5"/>
+                </svg>
               </button>
-              <button type="button" aria-label="Zoom in nearby region" title="Zoom in nearby region"
-                disabled={overviewDisabled || !onOverviewZoom || overviewSpanBp <= 2_001}
-                onClick={() => onOverviewZoom?.(2 / 3)}>
-                +
+              <button type="button" className="zoomin"
+                aria-label={broadOverview ? 'Zoom in nearby region' : 'Zoom in sequence window'}
+                title={broadOverview ? 'Zoom in · show a smaller nearby region' : 'Zoom in · show fewer bases'}
+                disabled={overviewDisabled || (broadOverview
+                  ? !onOverviewZoom || overviewSpanBp <= MIN_NEARBY_OVERVIEW_BP
+                  : !onOverviewResize || reference.end - reference.start + 1 <= MIN_OVERVIEW_BP)}
+                onClick={() => handleOverviewZoomPress(2 / 3)}>
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <circle cx="8" cy="8" r="5"/><path d="m12 12 5 5M5.5 8h5M8 5.5v5"/>
+                </svg>
               </button>
             </div>
           )}
           <div className="genomebar-context">
             <span className="genomebar-kicker">{broadOverview ? 'Nearby genes' : 'Gene overview'}</span>
-            {locusOverview.strand && (
-              <span className={`genomebar-strand overviewstrand ${locusOverview.strand === -1 ? 'rev' : 'fwd'}`}
-                title={locusOverview.strand === -1 ? '− strand · transcribed right to left' : '+ strand · transcribed left to right'}>
-                {locusOverview.strand === -1 ? '← − strand' : '+ strand →'}
-              </span>
-            )}
+            <span className="genomebar-hint">
+              {broadOverview ? 'Drag to move · zoom to scale' : 'Drag to move · pinch to zoom · select exon'}
+            </span>
           </div>
         </div>,
         overviewTarget,
@@ -1158,11 +1373,55 @@ const SequenceViewer = forwardRef(function SequenceViewer(
         </div>,
         document.body,
       )}
+      {featureMenu && createPortal(
+        <div className="featureactionmenu" role="menu" aria-label={`Actions for ${featureMenu.feature.name}`}
+          style={{ left: featureMenu.left, top: featureMenu.top }}>
+          <div className="featureactionsummary">
+            <i style={{ background: featureMenu.feature.color }} aria-hidden="true" />
+            <span><strong>{featureMenu.feature.name}</strong><small>{featureMenu.feature.range}</small></span>
+          </div>
+          {featureMenu.confirmDelete ? (
+            <div className="featuredeleteconfirm" role="alert">
+              <strong>Delete this feature?</strong>
+              <span>This removes the annotation from this session and from future .dna exports.</span>
+              <div>
+                <button type="button" onClick={() => setFeatureMenu((current) => ({ ...current, confirmDelete: false }))}>Cancel</button>
+                <button type="button" className="danger" onClick={() => {
+                  const feature = featureMenu.feature
+                  setFeatureMenu(null)
+                  onDeleteFeature?.(feature)
+                }}>Delete</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {onEditFeature && <button type="button" role="menuitem" onClick={() => {
+                const feature = featureMenu.feature
+                setFeatureMenu(null)
+                onEditFeature(feature)
+              }}>
+                <span aria-hidden="true">✎</span> Edit feature
+              </button>}
+              {onDeleteFeature && <button type="button" role="menuitem" className="danger" onClick={() => {
+                setFeatureMenu((current) => ({ ...current, confirmDelete: true }))
+              }}>
+                <span aria-hidden="true">×</span> Delete feature
+              </button>}
+            </>
+          )}
+        </div>,
+        document.body,
+      )}
       {selectionSummary ? (
-        <div className="selectionbar" role="status" aria-live="polite">
+        <div className="selectionbar" role="group" aria-label="Sequence selection summary">
           <span><strong>{selectionSummary.count.toLocaleString()}</strong> bases selected</span>
           <span>Range <strong>{selectionSummary.range}</strong></span>
           <span>GC <strong>{selectionSummary.gc.toFixed(1)}%</strong></span>
+          <button type="button" className="addfeaturebtn" disabled={!featureSelection}
+            title={featureSelection ? `Add ${featureSelection.length.toLocaleString()} selected bases as a feature` : 'This selection cannot be annotated'}
+            onClick={() => featureSelection && onAddFeature?.(featureSelection)}>
+            <span aria-hidden="true">+</span> Feature
+          </button>
         </div>
       ) : searchSummary ? (
         <div className="selectionbar searchsummary" role="status" aria-live="polite">

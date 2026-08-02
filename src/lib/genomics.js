@@ -136,6 +136,7 @@ export async function fetchVariants({ source, assembly, chrom, start, end }, sig
 const OFFTARGET_BUSY_RETRIES = 6
 const OFFTARGET_BATCH_SIZE = 100
 const offTargetCache = new Map()
+const advancedOffTargetCache = new Map()
 
 const offTargetCacheKey = (assembly, pam, guide) => [
   assembly,
@@ -267,4 +268,35 @@ export async function fetchOffTargets({ assembly, pam, guides }, signal, onProgr
       detail: String(error),
     }
   }
+}
+
+export async function fetchAdvancedOffTargets({ assembly, pam, guide }, signal) {
+  const key = offTargetCacheKey(assembly, pam, guide)
+  if (advancedOffTargetCache.has(key)) {
+    const payload = advancedOffTargetCache.get(key)
+    setBounded(advancedOffTargetCache, key, payload, 256)
+    return payload
+  }
+  for (let attempt = 0; attempt <= OFFTARGET_BUSY_RETRIES; attempt += 1) {
+    const response = await fetch('/api/genomics/offtargets-advanced', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assembly, pam, guide }),
+      signal,
+    })
+    if (response.status === 429 && attempt < OFFTARGET_BUSY_RETRIES) {
+      const retryAfter = Number(response.headers.get('Retry-After') ?? 5)
+      await abortableDelay(Math.max(1, retryAfter) * 1000, signal)
+      continue
+    }
+    if (!response.ok) {
+      let detail = `advanced off-target search returned ${response.status}`
+      try { detail = (await response.json())?.detail ?? detail } catch { /* non-JSON response */ }
+      throw new Error(detail)
+    }
+    const payload = await response.json()
+    if (payload.available) setBounded(advancedOffTargetCache, key, payload, 256)
+    return payload
+  }
+  return { available: false, detail: 'advanced off-target search remained busy' }
 }

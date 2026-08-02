@@ -1,6 +1,25 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { AnnotationControls } from './FeatureRibbon.jsx'
 
+const MAX_EDIT_SEQUENCE_PREVIEW = 18
+
+function compactEditLabel(edit) {
+  if (!edit?.label || edit.length <= MAX_EDIT_SEQUENCE_PREVIEW || edit.type === 'del') return edit?.label ?? ''
+  const marker = edit.type === 'ins' ? 'ins' : edit.type === 'sub' ? 'delins' : ''
+  const markerIndex = marker ? edit.label.lastIndexOf(marker) : -1
+  if (markerIndex < 0) return edit.label
+  const prefix = edit.label.slice(0, markerIndex + marker.length)
+  const sequence = edit.label.slice(markerIndex + marker.length)
+  const head = sequence.slice(0, 9)
+  const tail = sequence.slice(-6)
+  return `${prefix}${head}…${tail} · ${edit.length.toLocaleString()} bp`
+}
+
+function editSummary(edit) {
+  const kind = edit.type === 'ins' ? 'Insertion' : edit.type === 'del' ? 'Deletion' : 'Replacement'
+  return `${kind} · ${edit.length.toLocaleString()} bp. Center and highlight this edit in the sequence viewer.`
+}
+
 export function EditActions({
   edits, canUndo, canRedo, onUndo, onRedo, onRevert, compact = false,
 }) {
@@ -25,9 +44,11 @@ export function EditActions({
 
 export default function EditBar({
   editList, selRange, edits, canUndo, canRedo, onUndo, onRedo, onRevert,
-  onEditFocus,
+  onEditFocus, customFeatureCount = 0, onDownloadSnapGene, snapGeneDisabled = false,
   annotationOptions, onAnnotationChange, biotypes, annotationStatus, assembly, inputKey, loadedInputKey,
-  showAnnotations = true, sequenceSearch, onSequenceSearch, sequenceMatches, sequenceMatchIndex, onPreviousSequenceMatch, onNextSequenceMatch,
+  showAnnotations = true, sequenceLineMode = 'window', onSequenceLineMode,
+  exploreGuides = false, onExploreGuides, sequenceBlocked = false,
+  sequenceSearch, onSequenceSearch, sequenceMatches, sequenceMatchIndex, onPreviousSequenceMatch, onNextSequenceMatch,
 }) {
   const [hasEditedForInput, setHasEditedForInput] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -49,25 +70,25 @@ export default function EditBar({
     if (!bar || !helper) return undefined
 
     const measure = () => {
-      const styles = window.getComputedStyle(bar)
-      const horizontalPadding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight)
+      const main = bar.querySelector('.editbar-main')
+      if (!main) return
+      const styles = window.getComputedStyle(main)
       const gap = parseFloat(styles.columnGap || styles.gap) || 0
-      const annotations = bar.querySelector('.editannotations')
-      const search = bar.querySelector('.sequencefind')
-      const actions = bar.querySelector('.editbar-actions')
-      const fixedItems = [helper, annotations, search, actions].filter(Boolean)
+      const actions = main.querySelector('.editbar-actions')
+      const editList = main.querySelector('.editlist')
+      const fixedItems = [helper, actions, editList].filter(Boolean)
       const requiredWidth = fixedItems.reduce((total, item) => total + item.getBoundingClientRect().width, 0)
-        + Math.max(0, fixedItems.length - 1) * gap + horizontalPadding + 8
-      setHideHelperForSpace(requiredWidth > bar.clientWidth)
+        + Math.max(0, fixedItems.length - 1) * gap + 4
+      setHideHelperForSpace(requiredWidth > main.clientWidth)
     }
 
     measure()
     const observer = new ResizeObserver(measure)
     observer.observe(bar)
-    const annotations = bar.querySelector('.editannotations')
-    const search = bar.querySelector('.sequencefind')
-    if (annotations) observer.observe(annotations)
-    if (search) observer.observe(search)
+    const main = bar.querySelector('.editbar-main')
+    const tools = bar.querySelector('.editbar-tools')
+    if (main) observer.observe(main)
+    if (tools) observer.observe(tools)
     return () => observer.disconnect()
   }, [hideHelper, annotationOptions, biotypes, showAnnotations])
 
@@ -94,8 +115,31 @@ export default function EditBar({
     if (edits && !inputChanged) setHasEditedForInput(true)
   }, [edits, inputChanged])
 
+  const totalEditLabelLength = editList.reduce((total, edit) => total + (edit.label?.length || 0), 0)
+  const showEditsInline = editList.length > 0
+    && editList.length <= 3
+    && totalEditLabelLength <= 72
+    && editList.every(edit => (edit.label?.length || 0) <= 42)
+
+  const renderEditTag = (edit, index, compact = false) => {
+    const label = compact ? compactEditLabel(edit) : edit.label
+    return (
+      <button
+        key={index}
+        type="button"
+        className={`edittag ${edit.type}${label !== edit.label ? ' abbreviated' : ''}`}
+        title={editSummary(edit)}
+        aria-label={`${label}. ${editSummary(edit)}`}
+        onClick={() => onEditFocus?.(edit)}
+      >
+        {label}
+      </button>
+    )
+  }
+
   return (
     <div className="editbar" ref={editBarRef}>
+      <div className="editbar-main">
       {!hideHelper && (
         <div ref={helperRef} className={`edithint${hideHelperForSpace ? ' space-hidden' : ''}`} aria-hidden={hideHelperForSpace || undefined}>
           type <span className="kbd">A C G T</span> in the sequence to {selRange ? 'replace selection' : 'insert'} ·
@@ -115,30 +159,66 @@ export default function EditBar({
         />
       )}
 
-      <div className="editlist">
-        {editList.map((e, i) => (
-          <button
-            key={i}
-            type="button"
-            className={`edittag ${e.type}`}
-            title="Center and highlight this edit in the sequence viewer"
-            onClick={() => onEditFocus?.(e)}
-          >
-            {e.label}
+      {showEditsInline && (
+        <div className="editlist inline" aria-label={`${editList.length} sequence ${editList.length === 1 ? 'edit' : 'edits'}`}>
+          {editList.map((edit, index) => renderEditTag(edit, index))}
+        </div>
+      )}
+
+      {editList.length > 0 && !showEditsInline && (
+        <details className="editmenu">
+          <summary><span>Edits</span><b>{editList.length}</b><i aria-hidden="true" /></summary>
+          <div className="editlist">
+            {editList.map((edit, index) => renderEditTag(edit, index, true))}
+          </div>
+        </details>
+      )}
+      </div>
+
+      <div className="editbar-tools">
+      <button type="button" className={`toolbarshowguides${exploreGuides ? ' active' : ''}`}
+        aria-pressed={exploreGuides} disabled={sequenceBlocked}
+        title={exploreGuides ? 'Return to edit-specific guides' : 'Calculate guides across the displayed sequence'}
+        onClick={onExploreGuides}>
+        {exploreGuides ? (edits ? 'Edit-specific guides' : 'Hide all guides') : 'Show all guides'}
+      </button>
+      <div className="sequencelayout" role="group" aria-label="Sequence view">
+        {[
+          { value: 'window', label: 'Wrap to window' },
+          { value: 'fixed', label: 'Fixed 100 bp lines' },
+          { value: 'single', label: 'Single line' },
+        ].map((mode) => (
+          <button type="button" key={mode.value}
+            className={sequenceLineMode === mode.value ? 'active' : ''}
+            aria-label={mode.label} aria-pressed={sequenceLineMode === mode.value}
+            title={mode.label} onClick={() => onSequenceLineMode?.(mode.value)}>
+            <span className={`sequenceviewicon ${mode.value}`} aria-hidden="true">
+              <i /><i /><i />
+            </span>
           </button>
         ))}
       </div>
+      </div>
 
-      <>
-        {showAnnotations && (
-          <AnnotationControls
-            opts={annotationOptions}
-            onChange={onAnnotationChange}
-            biotypes={biotypes}
-            status={annotationStatus}
-            assembly={assembly}
-            className="editannotations"
-          />
+      <div className="editbar-annotationtray">
+        <div className={`annotationfeaturegroup${showAnnotations ? ' withannotations' : ''}`}>
+          {showAnnotations && (
+            <AnnotationControls
+              opts={annotationOptions}
+              onChange={onAnnotationChange}
+              biotypes={biotypes}
+              status={annotationStatus}
+              assembly={assembly}
+              className="editannotations"
+              compact
+            />
+          )}
+        </div>
+        {customFeatureCount > 0 && (
+          <button type="button" className="snapgeneexport" onClick={onDownloadSnapGene}
+            disabled={snapGeneDisabled} title="Download the edited sequence with edits and annotations as a SnapGene DNA file">
+            <span aria-hidden="true">↓</span> Save .dna <small>{customFeatureCount}</small>
+          </button>
         )}
           <div className={`sequencefind${searchOpen ? ' open' : ''}`}>
             <button type="button" className="sequencefind-toggle" aria-label="Find DNA sequence"
@@ -187,7 +267,7 @@ export default function EditBar({
               </div>
             )}
           </div>
-      </>
+      </div>
     </div>
   )
 }

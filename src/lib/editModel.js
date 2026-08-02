@@ -144,10 +144,26 @@ export function describeEdits(refSeq, edited, regionStart) {
     }
 
     if (rec.ref != null && rec.base !== refSeq[rec.ref]) {
+      let j = i + 1
+      while (j < edited.length) {
+        const previous = edited[j - 1]
+        const next = edited[j]
+        if (next.del || next.ref == null || previous.ref == null || next.ref !== previous.ref + 1 ||
+            next.base === refSeq[next.ref]) break
+        j += 1
+      }
+      const firstRef = rec.ref
+      const lastRef = edited[j - 1].ref
+      const replacement = edited.slice(i, j).map((record) => record.base).join('')
       out.push({
-        type: 'sub', refStart: rec.ref, refEnd: rec.ref, displayStart: i, displayEnd: i, length: 1,
-        label: `g.${pos(rec.ref)}${refSeq[rec.ref]}>${rec.base}`,
+        type: 'sub', refStart: firstRef, refEnd: lastRef,
+        displayStart: i, displayEnd: j - 1, length: j - i,
+        label: j - i === 1
+          ? `g.${pos(firstRef)}${refSeq[firstRef]}>${rec.base}`
+          : `g.${pos(firstRef)}_${pos(lastRef)}delins${replacement}`,
       })
+      i = j
+      continue
     }
     i++
   }
@@ -166,8 +182,25 @@ export function substitute(edited, index, base) {
 
 export function insertAt(edited, index, str) {
   if (!str) return edited
+  const bases = [...str]
   const next = edited.slice()
-  next.splice(index, 0, ...[...str].map((base) => ({ base, ref: null })))
+  let cursor = Math.max(0, Math.min(next.length, index))
+  let consumed = 0
+
+  // Typing or pasting at the caret left by a deletion is a replacement, not a
+  // separate insertion beside a deletion. Reuse consecutive deleted reference
+  // columns first so coordinates, codons, and net frame remain coherent.
+  while (consumed < bases.length && cursor < next.length) {
+    const record = next[cursor]
+    if (!record.del || record.ref == null) break
+    next[cursor] = { ...record, base: bases[consumed], del: false }
+    consumed += 1
+    cursor += 1
+  }
+
+  if (consumed < bases.length) {
+    next.splice(cursor, 0, ...bases.slice(consumed).map((base) => ({ base, ref: null })))
+  }
   return next
 }
 
@@ -196,10 +229,11 @@ export function deleteRange(edited, start, end) {
  * anything else is a ghosting delete followed by an insertion.
  */
 export function replaceRange(edited, start, end, str) {
-  if (str.length === end - start) {
+  const bases = [...str]
+  if (bases.length === end - start) {
     const next = edited.slice()
-    for (let k = 0; k < str.length; k++) {
-      next[start + k] = { ...next[start + k], base: str[k], del: false }
+    for (let k = 0; k < bases.length; k++) {
+      next[start + k] = { ...next[start + k], base: bases[k], del: false }
     }
     return next
   }

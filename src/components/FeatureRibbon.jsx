@@ -52,8 +52,116 @@ function Chip({ active, disabled, title, onClick, children }) {
   )
 }
 
+function CompactSelect({ value, options, onChange, disabled = false, ariaLabel }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  useDismissMenu(open, setOpen, ref)
+  const selected = options.find((option) => String(option.value) === String(value)) ?? options[0]
+
+  return (
+    <div className={`compactselect${open ? ' open' : ''}`} ref={ref}>
+      <button type="button" className="compactselect-trigger" disabled={disabled}
+        aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}>
+        <span>{selected?.label ?? 'Choose'}</span><i aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="compactselect-options" role="listbox" aria-label={ariaLabel}>
+          {options.map((option) => {
+            const active = String(option.value) === String(value)
+            return (
+              <button type="button" role="option" aria-selected={active}
+                className={active ? 'selected' : ''} key={String(option.value)}
+                onClick={() => {
+                  onChange(option.value)
+                  setOpen(false)
+                }}>
+                <span>{option.label}</span><i aria-hidden="true" />
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+function CompactClinvarMultiSelect({ enabled, selected, onChange, disabled = false, showHidden = true }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+  const isAll = selected == null
+  const count = isAll ? CLINVAR_CATEGORIES.length : selected.size
+  useDismissMenu(open, setOpen, ref)
+
+  const setAll = () => onChange({ enabled: true, selected: null })
+  const setNone = () => onChange({ enabled: true, selected: new Set() })
+  const setHidden = () => onChange({ enabled: false, selected })
+  const toggle = (id) => {
+    const next = new Set(!enabled
+      ? []
+      : isAll
+        ? CLINVAR_CATEGORIES.map((category) => category.id)
+        : selected)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    onChange({
+      enabled: true,
+      selected: next.size === CLINVAR_CATEGORIES.length ? null : next,
+    })
+  }
+
+  const summary = disabled
+    ? 'Unavailable'
+    : !enabled
+      ? 'Hidden'
+      : isAll
+        ? 'All significances'
+        : count === 0
+          ? 'None selected'
+          : `${count} selected`
+
+  return (
+    <div className={`compactselect compactmultiselect${open ? ' open' : ''}`} ref={ref}>
+      <button type="button" className="compactselect-trigger" disabled={disabled}
+        aria-label="ClinVar clinical significance" aria-haspopup="menu" aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}>
+        <span>{summary}</span><i aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="compactselect-options compactmultiselect-options" role="menu"
+          aria-label="ClinVar clinical significance filters">
+          <div className={`compactmultiselect-actions${showHidden ? '' : ' filters-only'}`}>
+            {showHidden && (
+              <button type="button" className={!enabled ? 'selected' : ''}
+                onClick={setHidden}><span>Hidden</span><i aria-hidden="true" /></button>
+            )}
+            <button type="button" className={enabled && isAll ? 'selected' : ''}
+              onClick={setAll}><span>All significances</span><i aria-hidden="true" /></button>
+            {!showHidden && (
+              <button type="button" className={enabled && !isAll && count === 0 ? 'selected' : ''}
+                onClick={setNone}><span>Deselect all</span><i aria-hidden="true" /></button>
+            )}
+          </div>
+          <div className="compactmultiselect-list">
+            {CLINVAR_CATEGORIES.map((category) => (
+              <label key={category.id} className="compactmultiselect-row">
+                <input type="checkbox"
+                  checked={enabled && (isAll || selected.has(category.id))}
+                  onChange={() => toggle(category.id)} />
+                <i className={`filterdot clin-${category.id}`} aria-hidden="true" />
+                <span>{category.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function AnnotationControls({
-  opts, onChange, biotypes, status, assembly, className = '',
+  opts, onChange, biotypes, status, assembly, className = '', compact = false,
 }) {
   const setLevel = (level) => onChange({
     ...opts,
@@ -63,6 +171,99 @@ export function AnnotationControls({
   const gnomadOk = !!status?.gnomad?.assemblies?.[assembly]
   const clinvarOk = !!status?.clinvar?.available?.[assembly]
   const mafIndex = mafIndexFor(opts.gnomadMaf ?? DEFAULT_GNOMAD_MAF)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef(null)
+  useDismissMenu(menuOpen, setMenuOpen, menuRef)
+
+  const geneMode = `${opts.featureLevels.gene ? 'gene' : ''}${opts.featureLevels.transcript ? '+transcript' : ''}` || 'off'
+  const activeCount = Number(!!opts.featureLevels.gene) + Number(!!opts.featureLevels.transcript)
+    + Number(!!opts.gnomad) + Number(!!opts.clinvar)
+  const geneOptions = [
+    { value: 'off', label: 'Hidden' },
+    { value: 'gene', label: 'Genes' },
+    { value: '+transcript', label: 'Transcripts' },
+    { value: 'gene+transcript', label: 'Genes + transcripts' },
+  ]
+  if (compact) {
+    return (
+      <div className={`annotationmenu${className ? ` ${className}` : ''}`} ref={menuRef}>
+        <button type="button" className={`annotationmenusummary${menuOpen ? ' open' : ''}`}
+          aria-expanded={menuOpen} aria-haspopup="menu" onClick={() => setMenuOpen((open) => !open)}>
+          <span className="annotationmenuicon" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M3 6h18M3 12h18M3 18h18" />
+              <rect x="5" y="3.5" width="6" height="5" rx="1" />
+              <rect x="13" y="9.5" width="7" height="5" rx="1" />
+              <rect x="7" y="15.5" width="5" height="5" rx="1" />
+            </svg>
+          </span>
+          <span>Annotations</span><b>{activeCount} on</b><i aria-hidden="true" />
+        </button>
+        {menuOpen && (
+          <div className="annotationmenupop" role="menu" aria-label="Sequence annotations">
+            <div className="annotationselectgrid">
+              <div className={`annotationselectfield ${geneMode !== 'off' ? 'enabled' : ''}`}>
+                <span>Gene models</span>
+                <CompactSelect value={geneMode} options={geneOptions} ariaLabel="Gene model annotations"
+                  onChange={(value) => onChange({
+                    ...opts,
+                    featureLevels: {
+                      ...opts.featureLevels,
+                      gene: value === 'gene' || value === 'gene+transcript',
+                      transcript: value === '+transcript' || value === 'gene+transcript',
+                    },
+                  })} />
+              </div>
+
+              {opts.featureLevels.transcript && (
+                <div className="annotationselectfield enabled secondary">
+                  <span>Transcript biotypes</span>
+                  <BiotypeMenu biotypes={biotypes} selected={opts.biotypes}
+                    onChange={(selected) => onChange({ ...opts, biotypes: selected })} />
+                </div>
+              )}
+
+              <div className={`annotationselectfield trackfield ${opts.gnomad ? 'enabled' : ''}`}>
+                <button type="button" className={`annotationtracktoggle${opts.gnomad ? ' active' : ''}`}
+                  aria-pressed={opts.gnomad} disabled={!gnomadOk}
+                  onClick={() => setTrack('gnomad')}>
+                  <i aria-hidden="true" /><span>gnomAD variants</span>
+                </button>
+                {opts.gnomad && (
+                  <label className="compactmafslider" title="Minimum gnomAD minor allele frequency shown">
+                    <input type="range" min="0" max={GNOMAD_MAF_STEPS.length - 1} step="1"
+                      value={mafIndex} aria-label="Minimum gnomAD minor allele frequency"
+                      onChange={(event) => onChange({
+                        ...opts,
+                        gnomadMaf: GNOMAD_MAF_STEPS[Number(event.target.value)].value,
+                      })} />
+                    <output>MAF ≥ {GNOMAD_MAF_STEPS[mafIndex].label}</output>
+                  </label>
+                )}
+              </div>
+
+              <div className={`annotationselectfield trackfield ${opts.clinvar ? 'enabled' : ''}`}>
+                <button type="button" className={`annotationtracktoggle${opts.clinvar ? ' active' : ''}`}
+                  aria-pressed={opts.clinvar} disabled={!clinvarOk}
+                  onClick={() => setTrack('clinvar')}>
+                  <i aria-hidden="true" /><span>ClinVar variants</span>
+                </button>
+                {opts.clinvar && (
+                  <CompactClinvarMultiSelect enabled
+                    selected={opts.clinvarSignificances} showHidden={false}
+                    onChange={({ selected }) => onChange({
+                      ...opts,
+                      clinvar: true,
+                      clinvarSignificances: selected,
+                    })} />
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className={`frgroup annotationsgroup${className ? ` ${className}` : ''}`}>
@@ -79,13 +280,12 @@ export function AnnotationControls({
           title={gnomadOk ? 'Show or hide gnomAD population variants' : 'gnomAD annotations are unavailable for this genome'}
           onClick={() => setTrack('gnomad')}>gnomAD</Chip>
         {opts.gnomad && (
-          <label className="annotationsetting mafslider" title="Minimum gnomAD minor allele frequency shown; common-frequency thresholds advance in 5% increments">
+          <label className="annotationsetting mafslider" title="Minimum gnomAD minor allele frequency shown">
             <span>MAF</span>
             <input type="range" min="0" max={GNOMAD_MAF_STEPS.length - 1} step="1"
-              value={mafIndex}
-              aria-label="Minimum gnomAD minor allele frequency"
+              value={mafIndex} aria-label="Minimum gnomAD minor allele frequency"
               onChange={(event) => onChange({ ...opts, gnomadMaf: GNOMAD_MAF_STEPS[Number(event.target.value)].value })} />
-            <output>≥ {GNOMAD_MAF_STEPS[mafIndex].label}</output>
+            <output>&gt;= {GNOMAD_MAF_STEPS[mafIndex].label}</output>
           </label>
         )}
         <Chip active={opts.clinvar} disabled={!clinvarOk}
@@ -136,7 +336,16 @@ export default function FeatureRibbon({
       <div className="locuscluster">
         <div className="locusprimary">
           <div className="locusidentity">
-            <strong>{locusOverview?.label}</strong>
+            <span className="locusname" title={locusOverview?.description || locusOverview?.label}>
+              <strong>{locusOverview?.label}</strong>
+              {locusOverview?.description && <small>{locusOverview.description}</small>}
+            </span>
+            {locusOverview?.strand && (
+              <span className={`genomebar-strand locusstrand ${locusOverview.strand === -1 ? 'rev' : 'fwd'}`}
+                title={locusOverview.strand === -1 ? '− strand · transcribed right to left' : '+ strand · transcribed left to right'}>
+                {locusOverview.strand === -1 ? '← − strand' : '+ strand →'}
+              </span>
+            )}
           </div>
           {currentExon && (
             <div className="exonnav" aria-label={`${exonNav.gene.name} canonical transcript navigation`}>

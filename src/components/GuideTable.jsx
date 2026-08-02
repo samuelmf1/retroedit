@@ -1,6 +1,36 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { fetchAdvancedOffTargets } from '../lib/genomics.js'
 
 const LIBRARY_REMINDER_KEY = 'retroedit:skip-library-review-reminder'
+const SPACER_LENGTH = 20
+const SEED_START_INDEX = 10 // PAM-proximal 10-nt seed: spacer positions 11–20.
+
+function mismatchContext(query, match) {
+  if (query.length !== SPACER_LENGTH || match.length !== SPACER_LENGTH) {
+    return { positions: [], seedPositions: [] }
+  }
+  const positions = [...query].flatMap((base, index) => base === match[index] ? [] : [index])
+  return { positions, seedPositions: positions.filter((index) => index >= SEED_START_INDEX) }
+}
+
+function seedMismatchMessage(total, seedPositions) {
+  if (!seedPositions.length || total < 1 || total > 2) return ''
+  const positions = seedPositions.map((index) => index + 1).join(', ')
+  if (total === 1) {
+    return `Lower off-target likelihood: its mismatch is in the PAM-proximal seed (spacer position ${positions}), where mismatches commonly impair Cas9 binding and cleavage.`
+  }
+  if (seedPositions.length === total) {
+    return `Lower off-target likelihood: both mismatches are in the PAM-proximal seed (spacer positions ${positions}), where mismatches commonly impair Cas9 binding and cleavage.`
+  }
+  return `Lower off-target likelihood: one mismatch is in the PAM-proximal seed (spacer position ${positions}); the other is outside the seed.`
+}
+
+function advancedSeedMessage(hit) {
+  const count = Number(hit.seedEditCount ?? 0)
+  if (!count) return ''
+  const noun = hit.bulgeType ? 'edit or bulge' : 'mismatch'
+  return `Lower off-target likelihood: ${count === 1 ? `one ${noun} falls` : `${count} edits fall`} in the PAM-proximal seed, where sequence differences commonly impair Cas9 binding and cleavage. This alignment is retained for review.`
+}
 
 function chromosomeRank(value) {
   const token = String(value || "").replace(/^chr/i, "").toUpperCase()
@@ -26,7 +56,7 @@ function offTargetHitKey(hit) {
   return [normalizeChromosome(hit.chrom), Number(hit.pos), hit.strand || "+"].join(":")
 }
 
-function OffTargetChromosomeMap({ assembly, queryChrom, queryPosition, hits, onQuery, onHit }) {
+function OffTargetChromosomeMap({ assembly, queryChrom, queryPosition, hits, onQuery, onHit, advanced = false }) {
   const lengths = HUMAN_CHROMOSOME_LENGTHS[assembly] || HUMAN_CHROMOSOME_LENGTHS.GRCh38
   const queryToken = normalizeChromosome(queryChrom)
   const maxLength = Math.max(...lengths.slice(0, 24))
@@ -60,8 +90,8 @@ function OffTargetChromosomeMap({ assembly, queryChrom, queryPosition, hits, onQ
                       <button type="button" className={`offtargetchromosomemarker hit mm${Math.min(2, Number(hit.mm) || 0)}`}
                         key={key + ":" + hitIndex}
                         style={{ top: Math.max(2, Math.min(98, (position / length) * 100)) + "%" }}
-                        aria-label={"Off-target on chromosome " + chromosome + " with " + hit.mm + " mismatches; scroll to alignment"}
-                        title={"chr" + chromosome + ":" + position.toLocaleString() + " · " + hit.mm + " MM"}
+                        aria-label={"Off-target on chromosome " + chromosome + " with " + hit.mm + (advanced ? " edits" : " mismatches") + "; scroll to alignment"}
+                        title={"chr" + chromosome + ":" + position.toLocaleString() + " · " + hit.mm + (advanced ? " ED" : " MM")}
                         onClick={() => onHit(key)} />
                     )
                   })}
@@ -104,13 +134,14 @@ function MiniOffTargetGeneView({ overview, targetStart, targetEnd }) {
 
 
 export default function GuideTable({
-  guides, hasEdits, exploreMode, onExploreMode, scorable, rs3Available, rs3Model, onRs3Model,
-  selectedGuideId, onSelect, checked, onToggle, onToggleAll, offAvailable, variantWarn, assembly, getOffTargetHref,
+  guides, hasEdits, sequenceBlocked = false, exploreMode, scorable, rs3Available, rs3Model, onRs3Model,
+  selectedGuideId, onSelect, checked, onToggle, onToggleAll, offAvailable, variantWarn, assembly, pamPattern = 'NGG', getOffTargetHref,
   showOffTargets = true,
 }) {
   const [sort, setSort] = useState(null)
   const [libraryPrompt, setLibraryPrompt] = useState(null)
   const [offTargetDialog, setOffTargetDialog] = useState(null)
+  const [advancedSearch, setAdvancedSearch] = useState({ status: 'idle', result: null, error: '', show: false })
   const [focusedOffTargetKey, setFocusedOffTargetKey] = useState(null)
   const [skipLibraryReminder, setSkipLibraryReminder] = useState(false)
   const [libraryReminderDisabled, setLibraryReminderDisabled] = useState(() => (
@@ -120,6 +151,7 @@ export default function GuideTable({
   const selectedRowRef = useRef(null)
   const offTargetQueryRef = useRef(null)
   const offTargetRowRefs = useRef(new Map())
+  const advancedSearchController = useRef(null)
   const visibleGuides = useMemo(() => sortGuides(guides, sort), [guides, sort])
   const selectedRowIndex = useMemo(
     () => visibleGuides.findIndex((guide) => guide.id === selectedGuideId),
@@ -150,10 +182,6 @@ export default function GuideTable({
   const someChecked = selectableIds.some((id) => checked.has(id))
   const nChecked = selectableIds.filter((id) => checked.has(id)).length
   const pendingCount = guides.length - readyIds.length
-  const exploreLabel = exploreMode
-    ? (hasEdits ? 'Show edit-specific guides' : 'Hide all guides')
-    : 'Show all guides'
-
   const requestGuideToggle = (guide) => {
     if (checked.has(guide.id) || libraryReminderDisabled) {
       onToggle(guide.id)
@@ -216,6 +244,50 @@ export default function GuideTable({
   }, [offTargetDialog])
 
   useEffect(() => {
+    advancedSearchController.current?.abort()
+    advancedSearchController.current = null
+    setAdvancedSearch({ status: 'idle', result: null, error: '', show: false })
+  }, [offTargetDialog?.id])
+
+  const runAdvancedSearch = async () => {
+    if (!offTargetDialog) return
+    if (advancedSearch.status === 'loading') {
+      advancedSearchController.current?.abort()
+      advancedSearchController.current = null
+      setAdvancedSearch((current) => ({ ...current, status: 'idle', error: '' }))
+      return
+    }
+    if (advancedSearch.result) {
+      setAdvancedSearch((current) => ({ ...current, show: !current.show }))
+      return
+    }
+    const controller = new AbortController()
+    advancedSearchController.current = controller
+    setAdvancedSearch({ status: 'loading', result: null, error: '', show: false })
+    try {
+      const result = await fetchAdvancedOffTargets({
+        assembly,
+        pam: pamPattern,
+        guide: {
+          id: offTargetDialog.id,
+          spacer: offTargetDialog.spacer,
+          chrom: offTargetDialog.chrom,
+          cutGenomic: offTargetDialog.cutGenomic,
+          protoGenomic: offTargetDialog.protoGenomic,
+        },
+      }, controller.signal)
+      if (!result.available) throw new Error(result.detail || 'Advanced off-target search is unavailable')
+      setAdvancedSearch({ status: 'done', result, error: '', show: true })
+    } catch (error) {
+      if (error.name !== 'AbortError') {
+        setAdvancedSearch({ status: 'error', result: null, error: error.message || String(error), show: false })
+      }
+    } finally {
+      if (advancedSearchController.current === controller) advancedSearchController.current = null
+    }
+  }
+
+  useEffect(() => {
     if (!focusedOffTargetKey) return undefined
     const timer = window.setTimeout(() => setFocusedOffTargetKey(null), 1400)
     return () => window.clearTimeout(timer)
@@ -230,8 +302,11 @@ export default function GuideTable({
     ? queryTargetChrom + ":" + queryTargetStart.toLocaleString() + "–" + (queryTargetStart + 19).toLocaleString()
     : null
   const queryChromRank = chromosomeRank(queryTargetChromRaw)
-  const orderedOffTargetHits = [...(offTargetDialog?.offtarget.top ?? [])].sort((left, right) => {
-    const mismatchDifference = Number(left.mm ?? 0) - Number(right.mm ?? 0)
+  const activeOffTarget = advancedSearch.show && advancedSearch.result
+    ? advancedSearch.result
+    : offTargetDialog?.offtarget
+  const orderedOffTargetHits = [...(activeOffTarget?.top ?? [])].sort((left, right) => {
+    const mismatchDifference = Number(left.cost ?? left.mm ?? 0) - Number(right.cost ?? right.mm ?? 0)
     if (mismatchDifference) return mismatchDifference
     const chromosomeDifference = Math.abs(chromosomeRank(left.chrom) - queryChromRank) -
       Math.abs(chromosomeRank(right.chrom) - queryChromRank)
@@ -257,30 +332,25 @@ export default function GuideTable({
       <header className="panelhead">
         <h2>sgRNAs</h2>
         <span className="count">{guides.length}</span>
-        <button
-          type="button"
-          className={`showallguides${exploreMode ? ' active' : ''}`}
-          aria-pressed={exploreMode}
-          onClick={onExploreMode}
-          title="Explore every spacer and PAM in the displayed sequence before choosing an edit"
-        >
-          {exploreLabel}
-        </button>
         <div className="exportgroup">
           {!exploreMode && <span className="selcount">{nChecked} in basket</span>}
           {sort && <button type="button" className="restoreorder" onClick={() => setSort(null)}>Restore recommended order</button>}
         </div>
       </header>
 
-      {!hasEdits && !exploreMode && (
+      {sequenceBlocked && (
+        <p className="empty invalidsequenceempty">Fix unsupported sequence symbols to resume guide scoring and design.</p>
+      )}
+
+      {!sequenceBlocked && !hasEdits && !exploreMode && (
         <p className="empty">Make an edit to see guides within 100 bp of it, ranked by Rule Set 3 on-target score.</p>
       )}
 
-      {!exploreMode && hasEdits && guides.length === 0 && (
+      {!sequenceBlocked && !exploreMode && hasEdits && guides.length === 0 && (
         <p className="empty">No PAM sites within 100 bp of the edit. Try a different PAM or edit position.</p>
       )}
 
-      {exploreMode && guides.length === 0 && (
+      {!sequenceBlocked && exploreMode && guides.length === 0 && (
         <p className="empty">No complete spacer + PAM sites are present in the displayed sequence.</p>
       )}
 
@@ -422,12 +492,22 @@ export default function GuideTable({
                   <div className="offtargetquerydetails">
                     <code className="offtargetqueryspacer">{offTargetDialog.spacer}</code>
                     <span className="offtargetquerypam"><small>PAM</small><b>{offTargetDialog.pamSeq}</b></span>
-                    <span className="offtargetquerycounts" aria-label="Genome-wide mismatch counts">
+                    <span className="offtargetquerycounts" aria-label={`Genome-wide ${activeOffTarget?.advanced ? 'edit-distance' : 'mismatch'} counts`}>
                       {["0", "1", "2"].map((mm) => (
-                        <span key={mm} className={`mm${mm}`}><small>{mm} MM</small><b>{offTargetDialog.offtarget.counts?.[mm] ?? 0}</b></span>
+                        <span key={mm} className={`mm${mm}`}><small>{mm} {activeOffTarget?.advanced ? 'ED' : 'MM'}</small><b>{activeOffTarget?.counts?.[mm] ?? 0}</b></span>
                       ))}
                     </span>
                   </div>
+                </div>
+                <div className="advancedofftargetcontrols">
+                  <button type="button" className={advancedSearch.show ? 'active' : ''} onClick={runAdvancedSearch}>
+                    {advancedSearch.status === 'loading'
+                      ? 'Cancel advanced search'
+                      : advancedSearch.result
+                        ? advancedSearch.show ? 'Show standard results' : 'Show advanced results'
+                        : 'Advanced bulge search'}
+                  </button>
+                  <span>Slow · searches substitutions and DNA/RNA bulges at edit distance 0–2</span>
                 </div>
               </div>
               <button type="button" className="spacermatchclose" aria-label="Close off-target details"
@@ -440,11 +520,20 @@ export default function GuideTable({
               hits={orderedOffTargetHits}
               onQuery={focusQueryTarget}
               onHit={focusOffTargetResult}
+              advanced={Boolean(activeOffTarget?.advanced)}
             />
             <p className="offtargetnote">
-              Genomic matches other than the intended target, ordered by mismatch count and then proximity to the query target.
-              {(offTargetDialog.offtarget.top?.length ?? 0) >= 20 && ' Showing the first 20 retained matches.'}
+              Genomic matches other than the intended target, ordered by {activeOffTarget?.advanced ? 'edit distance' : 'mismatch count'} and then proximity to the query target.
+              {activeOffTarget?.advanced && ' Seed-region alignments remain visible and are marked as lower-likelihood off-targets.'}
+              {activeOffTarget?.truncated && ' Results were limited; the closest retained alignments are shown.'}
             </p>
+            {advancedSearch.status === 'loading' && (
+              <div className="advancedofftargetloading" role="status" aria-live="polite">
+                <i aria-hidden="true" />
+                <div><strong>Searching genome for bulges…</strong><span>Scanning one chromosome at a time. This can take a while.</span></div>
+              </div>
+            )}
+            {advancedSearch.error && <p className="advancedofftargeterror" role="alert">{advancedSearch.error}</p>}
             <div className="offtargetmatchlist" role="list" aria-label="Potential off-target genomic matches">
               {orderedOffTargetHits.map((hit) => {
                 const chrom = String(hit.chrom).replace(/^chr/i, '')
@@ -453,7 +542,16 @@ export default function GuideTable({
                 const annotation = hit.annotation
                 const querySequence = String(offTargetDialog.spacer || "").toUpperCase()
                 const matchSequence = String(hit.sequence || "").toUpperCase()
-                const hasAlignment = querySequence.length === 20 && matchSequence.length === 20
+                const queryAligned = String(hit.queryAligned || querySequence).toUpperCase()
+                const matchAligned = String(hit.matchAligned || matchSequence).toUpperCase()
+                const hasAlignment = queryAligned.length > 0 && queryAligned.length === matchAligned.length
+                const mismatch = hit.queryAligned ? { seedPositions: hit.seedColumns ?? [] } : mismatchContext(querySequence, matchSequence)
+                const seedPositions = new Set(mismatch.seedPositions)
+                const seedNote = hit.queryAligned
+                  ? advancedSeedMessage(hit)
+                  : seedMismatchMessage(Number(hit.mm), mismatch.seedPositions)
+                const editDistance = Number(hit.cost ?? hit.mm ?? 0)
+                const targetEnd = Number(hit.protoEnd ?? (start + 19))
                 const hitKey = offTargetHitKey(hit)
                 return (
                   <article role="listitem" key={hitKey}
@@ -462,12 +560,12 @@ export default function GuideTable({
                       else offTargetRowRefs.current.delete(hitKey)
                     }}
                     className={focusedOffTargetKey === hitKey ? "located" : ""}>
-                    <span className={`offtargetmmbadge mm${Math.min(2, Number(hit.mm) || 0)}`}>
-                      {hit.mm} MM
+                    <span className={`offtargetmmbadge mm${Math.min(2, editDistance)}`}>
+                      {editDistance} {activeOffTarget?.advanced ? 'ED' : 'MM'}
                     </span>
                     <span className="offtargetlocus">
-                      <strong>chr{chrom}:{start.toLocaleString()}–{(start + 19).toLocaleString()}</strong>
-                      <small>{hit.strand} strand · PAM <code>{hit.pam}</code></small>
+                      <strong>chr{chrom}:{start.toLocaleString()}–{targetEnd.toLocaleString()}</strong>
+                      <small>{hit.strand} strand · PAM <code>{hit.pam}</code>{hit.bulgeType && <b className="offtargetbulgetag">{hit.bulgeType}</b>}</small>
                     </span>
                     <span className="offtargetgene">
                       {gene ? <><strong title={gene.id}>{gene.name}</strong><small>{gene.distance === 0
@@ -492,36 +590,48 @@ export default function GuideTable({
                       )}
                     </span>
                     {hasAlignment && (
-                      <div className="offtargetalignment" aria-label={`Query ${querySequence} PAM ${offTargetDialog.pamSeq}; genomic match ${matchSequence} PAM ${hit.pam}`}>
-                        <div className="offtargetalignmentseq">
-                          <span>Query</span>
-                          <code>{[...querySequence].map((base, baseIndex) => (
-                            <i key={baseIndex}>{base}</i>
-                          ))}{[...String(offTargetDialog.pamSeq || "")].map((base, pamIndex) => (
-                            <i key={"pam-" + pamIndex} className={`pam${pamIndex === 0 ? " pamstart" : ""}`}>{base}</i>
-                          ))}</code>
-                          <span aria-hidden="true" />
-                          <code className="offtargetmatchmarks" aria-hidden="true">
-                            {[...querySequence].map((base, baseIndex) => (
-                              <i key={baseIndex} className={base === matchSequence[baseIndex] ? "" : "mismatch"}>
-                                {base === matchSequence[baseIndex] ? "│" : "•"}
-                              </i>
-                            ))}
-                          </code>
-                          <span>Match</span>
-                          <code>{[...matchSequence].map((base, baseIndex) => (
-                            <i key={baseIndex} className={base === querySequence[baseIndex] ? "" : "mismatch"}>{base}</i>
-                          ))}{[...String(hit.pam || "")].map((base, pamIndex) => (
-                            <i key={"pam-" + pamIndex} className={`pam${pamIndex === 0 ? " pamstart" : ""}`}>{base}</i>
-                          ))}</code>
+                      <div className="offtargetalignment" aria-label={`Query ${queryAligned} PAM ${offTargetDialog.pamSeq}; genomic match ${matchAligned} PAM ${hit.pam}`}>
+                        {seedNote && (
+                          <span className="offtargetseednote">
+                            <b>Lower off-target likelihood</b>
+                            <span>{seedNote.replace(/^Lower off-target likelihood:\s*/, '')}</span>
+                          </span>
+                        )}
+                        <div className="offtargetalignmentcontent">
+                          <div className="offtargetalignmentseq">
+                            <span>Query</span>
+                            <code>{[...queryAligned].map((base, baseIndex) => (
+                              <i key={baseIndex} className={base === '-' ? `bulge${seedPositions.has(baseIndex) ? ' seedmismatch' : ''}` : ''}>{base}</i>
+                            ))}{[...String(offTargetDialog.pamSeq || "")].map((base, pamIndex) => (
+                              <i key={"pam-" + pamIndex} className={`pam${pamIndex === 0 ? " pamstart" : ""}`}>{base}</i>
+                            ))}</code>
+                            <span aria-hidden="true" />
+                            <code className="offtargetmatchmarks" aria-hidden="true">
+                              {[...queryAligned].map((base, baseIndex) => (
+                                <i key={baseIndex} className={base === matchAligned[baseIndex]
+                                  ? ""
+                                  : `${base === '-' || matchAligned[baseIndex] === '-' ? 'bulge' : 'mismatch'}${seedPositions.has(baseIndex) ? " seedmismatch" : ""}`}>
+                                  {base === matchAligned[baseIndex] ? "│" : base === '-' || matchAligned[baseIndex] === '-' ? '↕' : "•"}
+                                </i>
+                              ))}
+                            </code>
+                            <span>Match</span>
+                            <code>{[...matchAligned].map((base, baseIndex) => (
+                              <i key={baseIndex} className={base === queryAligned[baseIndex]
+                                ? ""
+                                : `${base === '-' || queryAligned[baseIndex] === '-' ? 'bulge' : 'mismatch'}${seedPositions.has(baseIndex) ? " seedmismatch" : ""}`}>{base}</i>
+                            ))}{[...String(hit.pam || "")].map((base, pamIndex) => (
+                              <i key={"pam-" + pamIndex} className={`pam${pamIndex === 0 ? " pamstart" : ""}`}>{base}</i>
+                            ))}</code>
+                          </div>
+                          <MiniOffTargetGeneView overview={annotation?.overview} targetStart={start} targetEnd={targetEnd} />
                         </div>
-                        <MiniOffTargetGeneView overview={annotation?.overview} targetStart={start} targetEnd={start + 19} />
                       </div>
                     )}
                   </article>
                 )
               })}
-              {!offTargetDialog.offtarget.top?.length && (
+              {!activeOffTarget?.top?.length && advancedSearch.status !== 'loading' && (
                 <p className="empty">Detailed off-target coordinates are unavailable for this result.</p>
               )}
             </div>
@@ -677,10 +787,9 @@ function offCell(g, offAvailable, onOpen) {
     ? 'Unique in the genome (1·0·0)'
     : `Not unique — genomic matches 0mm: ${c['0'] ?? 0}, 1mm: ${c['1'] ?? 0}, 2mm: ${c['2'] ?? 0}.` +
       ((c['0'] ?? 0) > 1 ? '\nWARNING: an exact match exists elsewhere.' : '\nClose matches elsewhere can be cut too.')
-  if (ot.unique) return <span className={`offt ${cls}`} title={tip}>{label}</span>
   return (
     <button type="button" className={`offt offtdetails ${cls}`}
-      title={`${tip}\nClick to inspect potential off-target sites and nearby genes.`}
+      title={`${tip}\nClick to inspect sites or run the advanced bulge search.`}
       aria-label={`Mismatch counts ${label}; inspect potential off-target sites`}
       onClick={(event) => {
         event.stopPropagation()

@@ -35,6 +35,7 @@ export const staticProvider = registerProvider('static', {
       genes: feats.filter((f) => (f.level ?? f.type) === 'gene'),
       transcripts: feats.filter((f) => (f.level ?? f.type) === 'transcript'),
       exons: feats.filter((f) => (f.level ?? f.type) === 'exon'),
+      custom: feats.filter((f) => !['gene', 'transcript', 'exon'].includes(f.level ?? f.type)),
     }
   },
 
