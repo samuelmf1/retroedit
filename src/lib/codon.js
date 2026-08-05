@@ -27,22 +27,49 @@ const SYNONYMS = (() => {
   return byAa
 })()
 
+// Homo sapiens codon usage, expressed as occurrences per 1,000 codons.
+// These values rank synonymous choices in the interactive amino-acid editor;
+// edit distance remains useful context but does not drive the recommendation.
+// Source: Kazusa Codon Usage Database, Homo sapiens coding sequences.
+// prettier-ignore
+export const HUMAN_CODON_USAGE_PER_THOUSAND = {
+  TTT:17.6,TTC:20.3,TTA:7.7,TTG:12.9,CTT:13.2,CTC:19.6,CTA:7.2,CTG:39.6,
+  ATT:16.0,ATC:20.8,ATA:7.5,ATG:22.0,GTT:11.0,GTC:14.5,GTA:7.1,GTG:28.1,
+  TCT:15.2,TCC:17.7,TCA:12.2,TCG:4.4,CCT:17.5,CCC:19.8,CCA:16.9,CCG:6.9,
+  ACT:13.1,ACC:18.9,ACA:15.1,ACG:6.1,GCT:18.4,GCC:27.7,GCA:15.8,GCG:7.4,
+  TAT:12.2,TAC:15.3,TAA:1.0,TAG:0.8,CAT:10.9,CAC:15.1,CAA:12.3,CAG:34.2,
+  AAT:17.0,AAC:19.1,AAA:24.4,AAG:31.9,GAT:21.8,GAC:25.1,GAA:29.0,GAG:39.6,
+  TGT:10.6,TGC:12.6,TGA:1.6,TGG:13.2,CGT:4.5,CGC:10.4,CGA:6.2,CGG:11.4,
+  AGT:12.1,AGC:19.5,AGA:12.2,AGG:12.0,GGT:10.8,GGC:22.2,GGA:16.5,GGG:16.5,
+}
+
 export function synonymousCodons(codon) {
   const aa = CODON_TABLE[codon]
   if (!aa) return []
   return SYNONYMS[aa].filter((c) => c !== codon)
 }
 
-/** Return every codon for `aminoAcid`, ranked by edit distance then name. */
+/**
+ * Return every codon for `aminoAcid`, ranked for expression in human cells.
+ * Human usage frequency is the primary criterion. Edit distance is returned
+ * for transparency and only breaks exact usage ties.
+ */
 export function codonsForAminoAcid(currentCodon, aminoAcid) {
   const current = String(currentCodon ?? '').toUpperCase()
   const aa = String(aminoAcid ?? '').toUpperCase()
   const codons = SYNONYMS[aa] ?? []
   if (current.length !== 3 || !codons.length) return []
-  return codons.map((codon) => ({
-    codon,
-    distance: [...codon].reduce((total, base, index) => total + Number(base !== current[index]), 0),
-  })).sort((a, b) => a.distance - b.distance || a.codon.localeCompare(b.codon))
+  const highestUsage = Math.max(...codons.map((codon) => HUMAN_CODON_USAGE_PER_THOUSAND[codon] ?? 0))
+  return codons.map((codon) => {
+    const humanUsage = HUMAN_CODON_USAGE_PER_THOUSAND[codon] ?? 0
+    return {
+      codon,
+      distance: [...codon].reduce((total, base, index) => total + Number(base !== current[index]), 0),
+      humanUsage,
+      relativeHumanUsage: highestUsage ? humanUsage / highestUsage : 0,
+    }
+  }).sort((a, b) =>
+    b.humanUsage - a.humanUsage || a.distance - b.distance || a.codon.localeCompare(b.codon))
 }
 
 /**
@@ -51,6 +78,7 @@ export function codonsForAminoAcid(currentCodon, aminoAcid) {
  */
 export function nearestCodonsForAminoAcid(currentCodon, aminoAcid) {
   const ranked = codonsForAminoAcid(currentCodon, aminoAcid)
+    .sort((a, b) => a.distance - b.distance || a.codon.localeCompare(b.codon))
   if (!ranked.length) return []
   return ranked.filter((item) => item.distance === ranked[0].distance)
 }
@@ -68,6 +96,10 @@ export function nearestCodonsForAminoAcid(currentCodon, aminoAcid) {
  */
 export function buildFrameMap(refStart, refLen, cdsSegments, strand) {
   const codonPos = new Int8Array(refLen).fill(-1)
+  // Reference indices in transcript order. Unlike genomic adjacency, this
+  // order remains continuous across exon junctions and lets a codon span an
+  // intron without pretending that the intronic bases belong to the CDS.
+  const transcriptRefs = []
   const segs = cdsSegments
     .filter((s) => s.strand === strand)
     .sort((a, b) => (strand === 1 ? a.start - b.start : b.start - a.start))
@@ -81,9 +113,25 @@ export function buildFrameMap(refStart, refLen, cdsSegments, strand) {
       const refIdx = genomic - refStart
       if (refIdx < 0 || refIdx >= refLen) continue
       codonPos[refIdx] = ((k - phase) % 3 + 3) % 3
+      transcriptRefs.push(refIdx)
     }
   }
-  return { codonPos, strand }
+
+  // Link every visible coding base to the other two bases in its biological
+  // codon. `codonPos` supplies the phase; `transcriptRefs` supplies adjacency
+  // across introns. Incomplete codons clipped by the displayed window remain
+  // unlinked until enough context is loaded.
+  const codonRefs = new Array(refLen).fill(null)
+  for (let t = 0; t < transcriptRefs.length; t++) {
+    const refIdx = transcriptRefs[t]
+    const first = t - codonPos[refIdx]
+    if (first < 0 || first + 2 >= transcriptRefs.length) continue
+    const refs = transcriptRefs.slice(first, first + 3)
+    if (refs.some((r, p) => codonPos[r] !== p)) continue
+    for (const r of refs) codonRefs[r] = refs
+  }
+
+  return { codonPos, codonRefs, strand }
 }
 
 /**
@@ -94,9 +142,10 @@ export function buildFrameMap(refStart, refLen, cdsSegments, strand) {
 export function codonAt(frame, refSeq, i) {
   const pos = frame.codonPos[i]
   if (pos < 0) return null
+  const linked = frame.codonRefs?.[i]
   const step = frame.strand === 1 ? 1 : -1
-  const first = i - step * pos // ref index of codon position 0
-  const idx = [first, first + step, first + 2 * step]
+  const first = i - step * pos // compatibility with older frame maps
+  const idx = linked ?? [first, first + step, first + 2 * step]
   if (idx.some((r) => r < 0 || r >= refSeq.length || frame.codonPos[r] < 0)) return null
 
   const bases = idx.map((r) => refSeq[r])
@@ -134,6 +183,9 @@ export function buildCodonTrack(frame, refSeq) {
   const n = refSeq.length
   const pos = new Int8Array(n).fill(-1)
   const parity = new Int8Array(n).fill(0)
+  // Bit 1 marks a split on the genomic left edge; bit 2 marks one on the
+  // genomic right edge. The renderer uses these as exon-junction continuations.
+  const splitEdge = new Uint8Array(n)
   const aa = new Array(n).fill(null)
 
   const ordinalOf = new Map()
@@ -147,8 +199,17 @@ export function buildCodonTrack(frame, refSeq) {
     pos[r] = frame.codonPos[r]
     aa[r] = c.aa
     parity[r] = ordinalOf.get(key) % 2
+    for (let p = 1; p < c.refIdx.length; p++) {
+      const a = c.refIdx[p - 1]
+      const b = c.refIdx[p]
+      if (Math.abs(a - b) <= 1) continue
+      const left = Math.min(a, b)
+      const right = Math.max(a, b)
+      splitEdge[left] |= 2
+      splitEdge[right] |= 1
+    }
   }
-  return { pos, parity, aa }
+  return { pos, parity, aa, splitEdge }
 }
 
 export { reverseComplement }

@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import json
 import gzip
+import queue
 import threading
 import time
 import re
@@ -23,9 +24,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 try:
@@ -51,11 +54,18 @@ GNOMAD_API_URL = os.environ.get("GNOMAD_API_URL", "https://gnomad.broadinstitute
 GNOMAD_API_TIMEOUT = float(os.environ.get("GNOMAD_API_TIMEOUT", "15"))
 GNOMAD_API_CACHE_TTL = int(os.environ.get("GNOMAD_API_CACHE_TTL", "900"))
 GNOMAD_API_CACHE_SIZE = int(os.environ.get("GNOMAD_API_CACHE_SIZE", "256"))
+GTEX_API_URL = os.environ.get("GTEX_API_URL", "https://gtexportal.org/api/v2").rstrip("/")
+GTEX_API_TIMEOUT = float(os.environ.get("GTEX_API_TIMEOUT", "10"))
+GTEX_CACHE_TTL = int(os.environ.get("GTEX_CACHE_TTL", "3600"))
+GTEX_CACHE_SIZE = int(os.environ.get("GTEX_CACHE_SIZE", "512"))
+UNIPROT_API_URL = os.environ.get("UNIPROT_API_URL", "https://rest.uniprot.org").rstrip("/")
+ALPHAFOLD_API_URL = os.environ.get("ALPHAFOLD_API_URL", "https://alphafold.ebi.ac.uk/api").rstrip("/")
+PROTEIN_STRUCTURE_TIMEOUT = float(os.environ.get("PROTEIN_STRUCTURE_TIMEOUT", "15"))
 OFFTARGET_CACHE_SIZE = int(os.environ.get("OFFTARGET_CACHE_SIZE", "10000"))
 ADVANCED_OFFTARGET_CACHE_SIZE = int(os.environ.get("ADVANCED_OFFTARGET_CACHE_SIZE", "256"))
-ADVANCED_OFFTARGET_MAX_RESULTS = int(os.environ.get("ADVANCED_OFFTARGET_MAX_RESULTS", "100"))
+ADVANCED_OFFTARGET_MAX_RESULTS = int(os.environ.get("ADVANCED_OFFTARGET_MAX_RESULTS", "500"))
 ADVANCED_OFFTARGET_TIMEOUT = int(os.environ.get("ADVANCED_OFFTARGET_TIMEOUT", "300"))
-ADVANCED_OFFTARGET_CHUNK_BP = int(os.environ.get("ADVANCED_OFFTARGET_CHUNK_BP", "5000000"))
+ADVANCED_OFFTARGET_CHUNK_BP = int(os.environ.get("ADVANCED_OFFTARGET_CHUNK_BP", "25000000"))
 GNOMAD_REMOTE_DATASETS = {
     "GRCh38": "gnomad_r4",
     "GRCh37": "gnomad_r2_1",
@@ -258,6 +268,234 @@ def _remote_region_variants(assembly: str, chrom: str, start: int, end: int) -> 
         while len(_remote_variant_cache) > max(1, GNOMAD_API_CACHE_SIZE):
             _remote_variant_cache.pop(next(iter(_remote_variant_cache)))
         return region
+
+
+# ---- GTEx tissue expression ------------------------------------------------
+
+_gtex_cache: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+_gtex_cache_lock = threading.Lock()
+_gtex_request_locks: Dict[str, threading.Lock] = {}
+
+
+def _gtex_get(path: str, params: dict) -> dict:
+    request = Request(
+        f"{GTEX_API_URL}{path}?{urlencode(params, doseq=True)}",
+        headers={"Accept": "application/json", "User-Agent": "RetroEdit/1.0"},
+    )
+    try:
+        with urlopen(request, timeout=GTEX_API_TIMEOUT) as response:
+            return json.load(response)
+    except HTTPError as exc:
+        detail = exc.read(500).decode("utf-8", errors="replace")
+        raise RuntimeError(f"GTEx API returned {exc.code}: {detail}") from exc
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"GTEx API request failed: {exc}") from exc
+
+
+def _gtex_expression_uncollapsed(gene: str) -> dict:
+    cache_key = gene.upper()
+    now = time.monotonic()
+    with _gtex_cache_lock:
+        cached = _gtex_cache.get(cache_key)
+        if cached and now - cached[0] < GTEX_CACHE_TTL:
+            _gtex_cache.move_to_end(cache_key)
+            return cached[1]
+
+    reference = _gtex_get("/reference/gene", {
+        "geneId": gene,
+        "gencodeVersion": "v39",
+        "genomeBuild": "GRCh38/hg38",
+        "itemsPerPage": 25,
+    })
+    candidates = reference.get("data") or []
+    resolved = next(
+        (row for row in candidates if str(row.get("geneSymbol", "")).upper() == cache_key),
+        candidates[0] if candidates else None,
+    )
+    if not resolved or not resolved.get("gencodeId"):
+        result = {
+            "available": True, "geneSymbol": gene, "gencodeId": None,
+            "datasetId": "gtex_v10", "unit": "TPM", "rows": [],
+        }
+    else:
+        gencode_id = resolved["gencodeId"]
+        expression = _gtex_get("/expression/medianGeneExpression", {
+            "gencodeId": gencode_id,
+            "datasetId": "gtex_v10",
+            "itemsPerPage": 1000,
+        })
+        result = {
+            "available": True,
+            "geneSymbol": resolved.get("geneSymbol") or gene,
+            "gencodeId": gencode_id,
+            "datasetId": "gtex_v10",
+            "unit": "TPM",
+            "rows": expression.get("data") or [],
+        }
+
+    with _gtex_cache_lock:
+        _gtex_cache[cache_key] = (time.monotonic(), result)
+        _gtex_cache.move_to_end(cache_key)
+        while len(_gtex_cache) > max(1, GTEX_CACHE_SIZE):
+            _gtex_cache.popitem(last=False)
+    return result
+
+
+def _gtex_expression(gene: str) -> dict:
+    cache_key = gene.upper()
+    with _gtex_cache_lock:
+        request_lock = _gtex_request_locks.setdefault(cache_key, threading.Lock())
+    # Collapse concurrent requests for one gene without blocking different genes.
+    with request_lock:
+        return _gtex_expression_uncollapsed(gene)
+
+
+@router.get("/gtex-expression")
+def gtex_expression(gene: str) -> dict:
+    symbol = gene.strip()
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", symbol):
+        raise HTTPException(status_code=400, detail="A valid gene symbol is required")
+    if not GTEX_API_URL:
+        raise HTTPException(status_code=503, detail="GTEx integration is unavailable")
+    try:
+        return _gtex_expression(symbol)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+# ---- AlphaFold protein structures -----------------------------------------
+
+_protein_structure_locks: Dict[str, threading.Lock] = {}
+_protein_structure_locks_guard = threading.Lock()
+_protein_model_locks: Dict[str, threading.Lock] = {}
+
+
+def _remote_json(url: str, label: str) -> dict | list:
+    request = Request(
+        url,
+        headers={"Accept": "application/json", "User-Agent": "RetroEdit/1.0"},
+    )
+    try:
+        with urlopen(request, timeout=PROTEIN_STRUCTURE_TIMEOUT) as response:
+            return json.load(response)
+    except HTTPError as exc:
+        detail = exc.read(500).decode("utf-8", errors="replace")
+        raise RuntimeError(f"{label} returned {exc.code}: {detail}") from exc
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"{label} request failed: {exc}") from exc
+
+
+@lru_cache(maxsize=512)
+def _protein_structure_metadata(gene: str, tax_id: int) -> dict:
+    cache_key = f"{tax_id}:{gene.upper()}"
+    with _protein_structure_locks_guard:
+        request_lock = _protein_structure_locks.setdefault(cache_key, threading.Lock())
+    with request_lock:
+        query = f"(gene_exact:{gene}) AND (organism_id:{tax_id}) AND (reviewed:true)"
+        uniprot_params = urlencode({
+            "query": query,
+            "fields": "accession,id,gene_names,protein_name,length,sequence",
+            "format": "json",
+            "size": 5,
+        })
+        uniprot = _remote_json(
+            f"{UNIPROT_API_URL}/uniprotkb/search?{uniprot_params}",
+            "UniProt API",
+        )
+        records = uniprot.get("results", []) if isinstance(uniprot, dict) else []
+        if not records:
+            return {"available": False, "gene": gene, "reason": "No reviewed UniProt entry was found."}
+        exact = next((record for record in records if any(
+            str(item.get("geneName", {}).get("value", "")).upper() == gene.upper()
+            for item in record.get("genes", [])
+        )), records[0])
+        accession = exact.get("primaryAccession")
+        if not accession:
+            return {"available": False, "gene": gene, "reason": "The UniProt entry has no accession."}
+
+        predictions = _remote_json(
+            f"{ALPHAFOLD_API_URL}/prediction/{accession}",
+            "AlphaFold DB API",
+        )
+        prediction = predictions[0] if isinstance(predictions, list) and predictions else None
+        if not prediction:
+            return {"available": False, "gene": gene, "accession": accession, "reason": "No AlphaFold model was found."}
+        entry_id = prediction.get("entryId") or prediction.get("modelEntityId")
+        sequence = prediction.get("uniprotSequence") or prediction.get("sequence") \
+            or exact.get("sequence", {}).get("value", "")
+        return {
+            "available": True,
+            "gene": prediction.get("gene") or gene,
+            "accession": accession,
+            "uniprotId": prediction.get("uniprotId") or exact.get("uniProtkbId"),
+            "description": prediction.get("uniprotDescription") or "Protein structure",
+            "entryId": entry_id,
+            "sourceUrl": f"https://alphafold.ebi.ac.uk/entry/{entry_id}",
+            "modelUrl": f"/api/genomics/protein-structure/model/{accession}",
+            "sequence": sequence,
+            "sequenceStart": prediction.get("sequenceStart", 1),
+            "sequenceEnd": prediction.get("sequenceEnd", len(sequence)),
+            "confidence": prediction.get("globalMetricValue"),
+            "version": prediction.get("latestVersion"),
+            "organism": prediction.get("organismScientificName"),
+            "chainId": prediction.get("chainId") or "A",
+            "pdbUrl": prediction.get("pdbUrl"),
+        }
+
+
+@router.get("/protein-structure")
+def protein_structure(gene: str, assembly: str = "GRCh38") -> dict:
+    symbol = gene.strip()
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", symbol):
+        raise HTTPException(status_code=400, detail="A valid gene symbol is required")
+    tax_id = 10090 if assembly == "GRCm39" else 9606 if assembly in {"GRCh37", "GRCh38"} else None
+    if tax_id is None:
+        return {"available": False, "gene": symbol, "reason": "Protein structures are unavailable for this custom assembly."}
+    try:
+        return _protein_structure_metadata(symbol.upper(), tax_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/protein-structure/model/{accession}")
+def protein_structure_model(accession: str) -> Response:
+    accession = accession.strip().upper()
+    if not re.fullmatch(r"[A-Z0-9]{6,10}", accession):
+        raise HTTPException(status_code=400, detail="Invalid UniProt accession")
+    try:
+        payload = _protein_model_payload(accession)
+        return Response(
+            content=payload,
+            media_type="chemical/x-pdb",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+    except HTTPException:
+        raise
+    except HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"AlphaFold model download returned {exc.code}") from exc
+    except (URLError, TimeoutError, RuntimeError) as exc:
+        raise HTTPException(status_code=502, detail=f"AlphaFold model download failed: {exc}") from exc
+
+
+@lru_cache(maxsize=32)
+def _protein_model_payload(accession: str) -> bytes:
+    with _protein_structure_locks_guard:
+        request_lock = _protein_model_locks.setdefault(accession, threading.Lock())
+    with request_lock:
+        predictions = _remote_json(
+            f"{ALPHAFOLD_API_URL}/prediction/{accession}",
+            "AlphaFold DB API",
+        )
+        prediction = predictions[0] if isinstance(predictions, list) and predictions else None
+        pdb_url = prediction.get("pdbUrl") if prediction else None
+        if not pdb_url or not pdb_url.startswith("https://alphafold.ebi.ac.uk/files/"):
+            raise HTTPException(status_code=404, detail="AlphaFold model unavailable")
+        request = Request(pdb_url, headers={"Accept": "application/octet-stream", "User-Agent": "RetroEdit/1.0"})
+        with urlopen(request, timeout=PROTEIN_STRUCTURE_TIMEOUT) as upstream:
+            payload = upstream.read(25 * 1024 * 1024 + 1)
+        if len(payload) > 25 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="AlphaFold model is too large to display")
+        return payload
 
 # ---- status ----------------------------------------------------------------
 
@@ -600,6 +838,7 @@ MAX_GUIDES = 100
 MAX_SPACER_MATCHES = 500
 MAX_SPACER_ALIGNMENTS = MAX_SPACER_MATCHES + 1
 FAIDX_BATCH_SIZE = 2000
+BOWTIE_THREADS = max(1, int(os.environ.get("BOWTIE_THREADS", "2")))
 COMP = str.maketrans("ACGTNacgtn", "TGCANtgcan")
 IUPAC_BASES = {
     "A": "A", "C": "C", "G": "G", "T": "T", "R": "AG", "Y": "CT",
@@ -1186,6 +1425,7 @@ class GuideOffTargets(BaseModel):
     counts: Dict[str, int]     # genomic matches by mismatch, on-target included: {"0":1,"1":0,"2":0}
     unique: bool               # True when the pattern is 1-0-0 (only the on-target)
     top: List[dict]            # matches other than the on-target: {chrom,pos,strand,mm,pam}
+    truncated: bool = False    # Bowtie reached the safety ceiling for this guide
 
 
 class OffTargetResponse(BaseModel):
@@ -1317,8 +1557,11 @@ def _advanced_hit_sort_key(hit: dict, guide: dict) -> tuple:
     )
 
 
-@router.post("/offtargets-advanced")
-def advanced_offtargets(req: AdvancedOffTargetRequest) -> dict:
+def _advanced_offtargets(
+    req: AdvancedOffTargetRequest,
+    on_progress=None,
+    cancel_event: Optional[threading.Event] = None,
+) -> dict:
     """Opt-in edit-distance search (substitutions plus DNA/RNA bulges) via Sassy."""
     assembly = req.assembly
     spacer = str(req.guide.get("spacer", "")).strip().upper()
@@ -1349,8 +1592,22 @@ def advanced_offtargets(req: AdvancedOffTargetRequest) -> dict:
     overlap = 20 + pam_length + 2
     timed_out = False
     chunk_size = max(1_000_000, ADVANCED_OFFTARGET_CHUNK_BP)
-    for contig, contig_length in _canonical_search_contigs(assembly):
+    search_contigs = _canonical_search_contigs(assembly)
+    completed_contigs: List[str] = []
+    total_contigs = len(search_contigs)
+    for contig, contig_length in search_contigs:
+        contig_label = str(contig).removeprefix("chr")
+        if on_progress:
+            on_progress({
+                "type": "progress",
+                "current": contig_label,
+                "completed": completed_contigs.copy(),
+                "completedCount": len(completed_contigs),
+                "total": total_contigs,
+            })
         for core_start0 in range(0, contig_length, chunk_size):
+            if cancel_event is not None and cancel_event.is_set():
+                return {"available": False, "cancelled": True, "detail": "advanced search cancelled"}
             if time.monotonic() - started > ADVANCED_OFFTARGET_TIMEOUT:
                 truncated = timed_out = True
                 break
@@ -1400,15 +1657,31 @@ def advanced_offtargets(req: AdvancedOffTargetRequest) -> dict:
                 if previous is None or (hit["cost"], bool(hit["bulgeType"])) < (previous["cost"], bool(previous["bulgeType"])):
                     hits_by_locus[locus_key] = hit
             del chromosome
+        completed_contigs.append(contig_label)
+        if on_progress:
+            on_progress({
+                "type": "progress",
+                "current": None,
+                "completed": completed_contigs.copy(),
+                "completedCount": len(completed_contigs),
+                "total": total_contigs,
+            })
         if timed_out:
             break
 
     all_hits = sorted(hits_by_locus.values(), key=lambda hit: _advanced_hit_sort_key(hit, req.guide))
-    counts = {str(distance): sum(hit["cost"] == distance for hit in all_hits) for distance in range(3)}
-    off_targets = [
+    # Count the same set that the modal renders. Sassy can return additional
+    # gapped alignments at the intended locus; those are alternative
+    # representations of the target, not distinct genomic off-targets.
+    all_off_targets = [
         hit for hit in all_hits
         if not _same_locus(hit["chrom"], hit["pos"], req.guide)
-    ][:ADVANCED_OFFTARGET_MAX_RESULTS]
+    ]
+    counts = {
+        str(distance): sum(hit["cost"] == distance for hit in all_off_targets)
+        for distance in range(3)
+    }
+    off_targets = all_off_targets[:ADVANCED_OFFTARGET_MAX_RESULTS]
     for hit in off_targets:
         hit["nearestGene"] = _nearest_gene(assembly, hit["chrom"], hit["pos"], hit["protoEnd"])
         hit["annotation"] = _offtarget_feature_context(
@@ -1420,9 +1693,7 @@ def advanced_offtargets(req: AdvancedOffTargetRequest) -> dict:
         "unique": counts["0"] <= 1 and counts["1"] == 0 and counts["2"] == 0,
         "top": off_targets,
         "advanced": True,
-        "truncated": truncated or len(all_hits) - sum(
-            _same_locus(hit["chrom"], hit["pos"], req.guide) for hit in all_hits
-        ) > ADVANCED_OFFTARGET_MAX_RESULTS,
+        "truncated": truncated or len(all_off_targets) > ADVANCED_OFFTARGET_MAX_RESULTS,
         "elapsedMs": round((time.monotonic() - started) * 1000),
         "detail": None,
     }
@@ -1432,6 +1703,55 @@ def advanced_offtargets(req: AdvancedOffTargetRequest) -> dict:
         while len(_advanced_offtarget_cache) > max(1, ADVANCED_OFFTARGET_CACHE_SIZE):
             _advanced_offtarget_cache.popitem(last=False)
     return payload
+
+
+@router.post("/offtargets-advanced")
+def advanced_offtargets(req: AdvancedOffTargetRequest) -> dict:
+    """Compatibility endpoint for clients that do not consume streamed progress."""
+    return _advanced_offtargets(req)
+
+
+@router.post("/offtargets-advanced-stream")
+def advanced_offtargets_stream(req: AdvancedOffTargetRequest) -> StreamingResponse:
+    """Stream chromosome-level progress followed by the completed advanced search."""
+    updates: queue.Queue = queue.Queue()
+    cancelled = threading.Event()
+
+    def publish(event: dict) -> None:
+        if not cancelled.is_set():
+            updates.put(event)
+
+    def run_search() -> None:
+        try:
+            result = _advanced_offtargets(req, on_progress=publish, cancel_event=cancelled)
+            if not cancelled.is_set():
+                publish({"type": "result", "payload": result})
+        except HTTPException as exc:
+            publish({"type": "error", "detail": str(exc.detail), "status": exc.status_code})
+        except Exception as exc:
+            publish({"type": "error", "detail": str(exc)})
+        finally:
+            updates.put(None)
+
+    threading.Thread(target=run_search, name="advanced-offtarget-search", daemon=True).start()
+
+    def stream():
+        try:
+            while True:
+                event = updates.get()
+                if event is None:
+                    break
+                yield json.dumps(event, separators=(",", ":")) + "\n"
+        finally:
+            cancelled.set()
+
+    return StreamingResponse(
+        stream(),
+        # Starlette deliberately skips gzip buffering for event streams, so
+        # each NDJSON progress record reaches the browser immediately.
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no"},
+    )
 
 
 def _offtarget_cache_key(assembly: str, pam: str, guide: dict) -> tuple:
@@ -1471,6 +1791,7 @@ def _store_offtarget(
             "counts": result.counts,
             "unique": result.unique,
             "top": result.top,
+            "truncated": result.truncated,
         }
 def _pam_ok(seq3: str, pam: str) -> bool:
     seq3 = seq3.upper()
@@ -1509,7 +1830,7 @@ def spacer_matches(req: SpacerMatchRequest) -> dict:
     try:
         proc = subprocess.run(
             [BOWTIE, "--mm", "--sam-nohead", "-x", str(_bowtie_index_prefix(assembly)), "-f", "-", "-v", "0",
-             "-k", str(MAX_SPACER_ALIGNMENTS), "--quiet", "-S"],
+             "-k", str(MAX_SPACER_ALIGNMENTS), "-p", str(BOWTIE_THREADS), "--quiet", "-S"],
             input=reads, capture_output=True, text=True, timeout=300,
         )
     except Exception as exc:
@@ -1622,7 +1943,7 @@ def offtargets(req: OffTargetRequest) -> OffTargetResponse:
     try:
         proc = subprocess.run(
             [BOWTIE, "--mm", "--sam-nohead", "-x", index_prefix, "-f", "-", "-v", str(MAX_MM),
-             "-k", str(MAX_HITS), "--quiet", "-S"],
+             "-k", str(MAX_HITS), "-p", str(BOWTIE_THREADS), "--quiet", "-S"],
             input=reads, capture_output=True, text=True, timeout=300,
         )
     except Exception as exc:
@@ -1631,7 +1952,8 @@ def offtargets(req: OffTargetRequest) -> OffTargetResponse:
         detail = proc.stderr.strip() or f"exit code {proc.returncode}"
         return OffTargetResponse(available=False, detail=f"bowtie failed: {detail}")
 
-    # Collect hits per read, gather PAM-flank regions to fetch in one faidx call.
+    # Collect hits per read. Fetch each 20-nt protospacer and its adjacent PAM
+    # as one 23-nt interval instead of two separate faidx intervals.
     hits: Dict[int, list] = {}
     regions: list = []
     for line in proc.stdout.splitlines():
@@ -1654,11 +1976,13 @@ def offtargets(req: OffTargetRequest) -> OffTargetResponse:
             pam_start, pam_end = pos + 20, pos + 22
         else:
             pam_start, pam_end = pos - 3, pos - 1
-        regions.append(f"{chrom}:{max(1, pam_start)}-{pam_end}")
-        regions.append(f"{chrom}:{pos}-{pos + 19}")
+        fetch_start = max(1, pos - 3) if rev else pos
+        fetch_end = pos + 19 if rev else pos + 22
+        fetch_region = f"{chrom}:{fetch_start}-{fetch_end}"
+        regions.append(fetch_region)
         hits.setdefault(read_i, []).append(
             {"chrom": chrom, "pos": pos, "rev": rev, "mm": mm,
-             "pam_region": (chrom, pam_start, pam_end)}
+             "pam_region": (chrom, pam_start, pam_end), "fetch_region": fetch_region}
         )
 
     pam_seq = _faidx_batch(faidx, regions)
@@ -1669,18 +1993,21 @@ def offtargets(req: OffTargetRequest) -> OffTargetResponse:
         counts = {str(k): 0 for k in range(MAX_MM + 1)}
         top = []
         for h in guide_hits:
-            chrom, ps, pe = h["pam_region"]
-            raw = pam_seq.get(f"{chrom}:{max(1, ps)}-{pe}", "")
-            pam = raw if not h["rev"] else _revcomp(raw)
-            site_raw = pam_seq.get(f"{chrom}:{h['pos']}-{h['pos'] + 19}", "")
-            site = site_raw if not h["rev"] else _revcomp(site_raw)
+            chrom, _, _ = h["pam_region"]
+            raw = pam_seq.get(h["fetch_region"], "").upper()
+            if h["rev"]:
+                pam = _revcomp(raw[:3])
+                site = _revcomp(raw[3:23])
+            else:
+                site = raw[:20]
+                pam = raw[20:23]
             if not _pam_ok(pam, req.pam):
                 continue
             # Count every genomic match (the on-target is included, so a truly
             # unique guide reads 1-0-0). List everything except the on-target as
             # a potential off-target.
             counts[str(h["mm"])] = counts.get(str(h["mm"]), 0) + 1
-            if not (g.get("chrom") and _same_locus(chrom, h["pos"], g)) and len(top) < 20:
+            if not (g.get("chrom") and _same_locus(chrom, h["pos"], g)):
                 top.append({"chrom": chrom, "pos": h["pos"],
                             "strand": "-" if h["rev"] else "+", "mm": h["mm"],
                             "pam": pam, "sequence": site})
@@ -1697,6 +2024,7 @@ def offtargets(req: OffTargetRequest) -> OffTargetResponse:
         )
         result = GuideOffTargets(
             id=str(g.get("id", i)), counts=counts, unique=unique, top=top,
+            truncated=len(guide_hits) >= MAX_HITS,
         )
         computed[result.id] = result
         _store_offtarget(assembly, req.pam, g, result)

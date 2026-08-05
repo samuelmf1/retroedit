@@ -56,10 +56,62 @@ function offTargetHitKey(hit) {
   return [normalizeChromosome(hit.chrom), Number(hit.pos), hit.strand || "+"].join(":")
 }
 
-function OffTargetChromosomeMap({ assembly, queryChrom, queryPosition, hits, onQuery, onHit, advanced = false }) {
+function mergeAdvancedOffTargets(advanced, standard) {
+  if (!advanced) return standard
+
+  const byLocus = new Map()
+  const addHit = (hit, metricType) => {
+    const normalized = {
+      ...hit,
+      metricType,
+      displayDistance: Number(hit.cost ?? hit.mm ?? 0),
+    }
+    const key = offTargetHitKey(normalized)
+    const previous = byLocus.get(key)
+    if (!previous || normalized.displayDistance < previous.displayDistance || (
+      normalized.displayDistance === previous.displayDistance &&
+      normalized.metricType === 'MM' && previous.metricType !== 'MM'
+    )) {
+      byLocus.set(key, normalized)
+    }
+  }
+
+  // A substitution-only Bowtie hit is the more conservative classification.
+  // Retain it whenever Sassy represents the same locus with a larger edit
+  // distance (for example, 1 MM versus an alternative 2 ED alignment).
+  for (const hit of standard?.top ?? []) addHit(hit, 'MM')
+  for (const hit of advanced.top ?? []) addHit(hit, 'ED')
+
+  const top = [...byLocus.values()]
+  const counts = { 0: 0, 1: 0, 2: 0 }
+  for (const hit of top) {
+    const distance = Math.min(2, Math.max(0, hit.displayDistance))
+    counts[distance] += 1
+  }
+  return {
+    ...advanced,
+    top,
+    counts,
+    mixedMetrics: top.some((hit) => hit.metricType === 'MM'),
+  }
+}
+
+function OffTargetChromosomeMap({
+  assembly, queryChrom, queryPosition, hits, onQuery, onHit, advanced = false, searchProgress = null,
+}) {
   const lengths = HUMAN_CHROMOSOME_LENGTHS[assembly] || HUMAN_CHROMOSOME_LENGTHS.GRCh38
   const queryToken = normalizeChromosome(queryChrom)
   const maxLength = Math.max(...lengths.slice(0, 24))
+  const completedChromosomes = useMemo(
+    () => new Set((searchProgress?.completed || []).map(normalizeChromosome)),
+    [searchProgress?.completed],
+  )
+  const hitsByChromosome = useMemo(() => {
+    const grouped = new Map(HUMAN_CHROMOSOMES.map((chromosome) => [chromosome, []]))
+    for (const hit of hits) grouped.get(normalizeChromosome(hit.chrom))?.push(hit)
+    return grouped
+  }, [hits])
+  const currentChromosome = normalizeChromosome(searchProgress?.current)
   return (
     <section className="offtargetchromosomes" aria-label="Chromosome locations of query and off-target matches">
       <header>
@@ -70,11 +122,15 @@ function OffTargetChromosomeMap({ assembly, queryChrom, queryPosition, hits, onQ
         <div className="offtargetchromosomegrid">
           {HUMAN_CHROMOSOMES.map((chromosome, chromosomeIndex) => {
             const length = lengths[chromosomeIndex]
-            const chromosomeHits = hits.filter((hit) => normalizeChromosome(hit.chrom) === chromosome)
+            const chromosomeHits = hitsByChromosome.get(chromosome) || []
             const queryHere = queryToken === chromosome && Number.isFinite(queryPosition)
             const bodyHeight = Math.max(14, Math.round((length / maxLength) * 48))
             return (
-              <div className="offtargetchromosome" key={chromosome}>
+              <div className={[
+                'offtargetchromosome',
+                completedChromosomes.has(chromosome) ? 'scan-complete' : '',
+                currentChromosome === chromosome ? 'scan-current' : '',
+              ].filter(Boolean).join(' ')} key={chromosome}>
                 <div className="offtargetchromosomebody" style={{ height: bodyHeight }}>
                   {queryHere && (
                     <button type="button" className="offtargetchromosomemarker query"
@@ -86,12 +142,14 @@ function OffTargetChromosomeMap({ assembly, queryChrom, queryPosition, hits, onQ
                   {chromosomeHits.map((hit, hitIndex) => {
                     const position = Number(hit.pos)
                     const key = offTargetHitKey(hit)
+                    const distance = Number(hit.displayDistance ?? hit.cost ?? hit.mm) || 0
+                    const metricType = hit.metricType || (advanced ? 'ED' : 'MM')
                     return (
-                      <button type="button" className={`offtargetchromosomemarker hit mm${Math.min(2, Number(hit.mm) || 0)}`}
+                      <button type="button" className={`offtargetchromosomemarker hit mm${Math.min(2, distance)}`}
                         key={key + ":" + hitIndex}
                         style={{ top: Math.max(2, Math.min(98, (position / length) * 100)) + "%" }}
-                        aria-label={"Off-target on chromosome " + chromosome + " with " + hit.mm + (advanced ? " edits" : " mismatches") + "; scroll to alignment"}
-                        title={"chr" + chromosome + ":" + position.toLocaleString() + " · " + hit.mm + (advanced ? " ED" : " MM")}
+                        aria-label={"Off-target on chromosome " + chromosome + " with " + distance + (metricType === "ED" ? " edits" : " mismatches") + "; scroll to alignment"}
+                        title={"chr" + chromosome + ":" + position.toLocaleString() + " · " + distance + " " + metricType}
                         onClick={() => onHit(key)} />
                     )
                   })}
@@ -141,7 +199,9 @@ export default function GuideTable({
   const [sort, setSort] = useState(null)
   const [libraryPrompt, setLibraryPrompt] = useState(null)
   const [offTargetDialog, setOffTargetDialog] = useState(null)
-  const [advancedSearch, setAdvancedSearch] = useState({ status: 'idle', result: null, error: '', show: false })
+  const [advancedSearch, setAdvancedSearch] = useState({
+    status: 'idle', result: null, error: '', show: false, progress: null,
+  })
   const [focusedOffTargetKey, setFocusedOffTargetKey] = useState(null)
   const [skipLibraryReminder, setSkipLibraryReminder] = useState(false)
   const [libraryReminderDisabled, setLibraryReminderDisabled] = useState(() => (
@@ -176,7 +236,10 @@ export default function GuideTable({
     return () => cancelAnimationFrame(frame)
   }, [selectedGuideId, selectedRowIndex, sort])
 
-  const readyIds = guides.filter((guide) => guide.metricsReady).map((guide) => guide.id)
+  const readyIds = useMemo(
+    () => guides.filter((guide) => guide.metricsReady).map((guide) => guide.id),
+    [guides],
+  )
   const selectableIds = exploreMode ? [] : readyIds
   const allChecked = selectableIds.length > 0 && selectableIds.every((id) => checked.has(id))
   const someChecked = selectableIds.some((id) => checked.has(id))
@@ -246,7 +309,7 @@ export default function GuideTable({
   useEffect(() => {
     advancedSearchController.current?.abort()
     advancedSearchController.current = null
-    setAdvancedSearch({ status: 'idle', result: null, error: '', show: false })
+    setAdvancedSearch({ status: 'idle', result: null, error: '', show: false, progress: null })
   }, [offTargetDialog?.id])
 
   const runAdvancedSearch = async () => {
@@ -254,7 +317,7 @@ export default function GuideTable({
     if (advancedSearch.status === 'loading') {
       advancedSearchController.current?.abort()
       advancedSearchController.current = null
-      setAdvancedSearch((current) => ({ ...current, status: 'idle', error: '' }))
+      setAdvancedSearch((current) => ({ ...current, status: 'idle', error: '', progress: null }))
       return
     }
     if (advancedSearch.result) {
@@ -263,7 +326,13 @@ export default function GuideTable({
     }
     const controller = new AbortController()
     advancedSearchController.current = controller
-    setAdvancedSearch({ status: 'loading', result: null, error: '', show: false })
+    setAdvancedSearch({
+      status: 'loading',
+      result: null,
+      error: '',
+      show: false,
+      progress: { current: null, completed: [], completedCount: 0, total: 24 },
+    })
     try {
       const result = await fetchAdvancedOffTargets({
         assembly,
@@ -275,12 +344,18 @@ export default function GuideTable({
           cutGenomic: offTargetDialog.cutGenomic,
           protoGenomic: offTargetDialog.protoGenomic,
         },
-      }, controller.signal)
+      }, controller.signal, (progress) => {
+        setAdvancedSearch((current) => (
+          current.status === 'loading' ? { ...current, progress } : current
+        ))
+      })
       if (!result.available) throw new Error(result.detail || 'Advanced off-target search is unavailable')
-      setAdvancedSearch({ status: 'done', result, error: '', show: true })
+      setAdvancedSearch({ status: 'done', result, error: '', show: true, progress: null })
     } catch (error) {
       if (error.name !== 'AbortError') {
-        setAdvancedSearch({ status: 'error', result: null, error: error.message || String(error), show: false })
+        setAdvancedSearch({
+          status: 'error', result: null, error: error.message || String(error), show: false, progress: null,
+        })
       }
     } finally {
       if (advancedSearchController.current === controller) advancedSearchController.current = null
@@ -302,11 +377,14 @@ export default function GuideTable({
     ? queryTargetChrom + ":" + queryTargetStart.toLocaleString() + "–" + (queryTargetStart + 19).toLocaleString()
     : null
   const queryChromRank = chromosomeRank(queryTargetChromRaw)
-  const activeOffTarget = advancedSearch.show && advancedSearch.result
-    ? advancedSearch.result
-    : offTargetDialog?.offtarget
-  const orderedOffTargetHits = [...(activeOffTarget?.top ?? [])].sort((left, right) => {
-    const mismatchDifference = Number(left.cost ?? left.mm ?? 0) - Number(right.cost ?? right.mm ?? 0)
+  const activeOffTarget = useMemo(() => (
+    advancedSearch.show && advancedSearch.result
+      ? mergeAdvancedOffTargets(advancedSearch.result, offTargetDialog?.offtarget)
+      : offTargetDialog?.offtarget
+  ), [advancedSearch.show, advancedSearch.result, offTargetDialog?.offtarget])
+  const orderedOffTargetHits = useMemo(() => [...(activeOffTarget?.top ?? [])].sort((left, right) => {
+    const mismatchDifference = Number(left.displayDistance ?? left.cost ?? left.mm ?? 0) -
+      Number(right.displayDistance ?? right.cost ?? right.mm ?? 0)
     if (mismatchDifference) return mismatchDifference
     const chromosomeDifference = Math.abs(chromosomeRank(left.chrom) - queryChromRank) -
       Math.abs(chromosomeRank(right.chrom) - queryChromRank)
@@ -315,7 +393,7 @@ export default function GuideTable({
     const rightPosition = Number(right.pos ?? 0)
     const positionDifference = Math.abs(leftPosition - queryTargetStart) - Math.abs(rightPosition - queryTargetStart)
     return positionDifference || leftPosition - rightPosition
-  })
+  }), [activeOffTarget, queryChromRank, queryTargetStart])
   const focusOffTargetResult = (key) => {
     const target = offTargetRowRefs.current.get(key)
     if (!target) return
@@ -492,9 +570,9 @@ export default function GuideTable({
                   <div className="offtargetquerydetails">
                     <code className="offtargetqueryspacer">{offTargetDialog.spacer}</code>
                     <span className="offtargetquerypam"><small>PAM</small><b>{offTargetDialog.pamSeq}</b></span>
-                    <span className="offtargetquerycounts" aria-label={`Genome-wide ${activeOffTarget?.advanced ? 'edit-distance' : 'mismatch'} counts`}>
+                    <span className="offtargetquerycounts" aria-label={`Genome-wide ${activeOffTarget?.mixedMetrics ? 'best mismatch or edit-distance' : activeOffTarget?.advanced ? 'edit-distance' : 'mismatch'} counts`}>
                       {["0", "1", "2"].map((mm) => (
-                        <span key={mm} className={`mm${mm}`}><small>{mm} {activeOffTarget?.advanced ? 'ED' : 'MM'}</small><b>{activeOffTarget?.counts?.[mm] ?? 0}</b></span>
+                        <span key={mm} className={`mm${mm}`}><small>{mm} {activeOffTarget?.mixedMetrics ? 'ED/MM' : activeOffTarget?.advanced ? 'ED' : 'MM'}</small><b>{activeOffTarget?.counts?.[mm] ?? 0}</b></span>
                       ))}
                     </span>
                   </div>
@@ -521,6 +599,7 @@ export default function GuideTable({
               onQuery={focusQueryTarget}
               onHit={focusOffTargetResult}
               advanced={Boolean(activeOffTarget?.advanced)}
+              searchProgress={advancedSearch.status === 'loading' ? advancedSearch.progress : null}
             />
             <p className="offtargetnote">
               Genomic matches other than the intended target, ordered by {activeOffTarget?.advanced ? 'edit distance' : 'mismatch count'} and then proximity to the query target.
@@ -530,7 +609,14 @@ export default function GuideTable({
             {advancedSearch.status === 'loading' && (
               <div className="advancedofftargetloading" role="status" aria-live="polite">
                 <i aria-hidden="true" />
-                <div><strong>Searching genome for bulges…</strong><span>Scanning one chromosome at a time. This can take a while.</span></div>
+                <div>
+                  <strong>Searching genome for bulges…</strong>
+                  <span>
+                    {advancedSearch.progress?.current
+                      ? `Scanning chromosome ${advancedSearch.progress.current} · ${advancedSearch.progress.completedCount || 0}/${advancedSearch.progress.total || 24} complete`
+                      : `Preparing chromosome scan · ${advancedSearch.progress?.completedCount || 0}/${advancedSearch.progress?.total || 24} complete`}
+                  </span>
+                </div>
               </div>
             )}
             {advancedSearch.error && <p className="advancedofftargeterror" role="alert">{advancedSearch.error}</p>}
@@ -550,7 +636,8 @@ export default function GuideTable({
                 const seedNote = hit.queryAligned
                   ? advancedSeedMessage(hit)
                   : seedMismatchMessage(Number(hit.mm), mismatch.seedPositions)
-                const editDistance = Number(hit.cost ?? hit.mm ?? 0)
+                const editDistance = Number(hit.displayDistance ?? hit.cost ?? hit.mm ?? 0)
+                const metricType = hit.metricType || (activeOffTarget?.advanced ? 'ED' : 'MM')
                 const targetEnd = Number(hit.protoEnd ?? (start + 19))
                 const hitKey = offTargetHitKey(hit)
                 return (
@@ -561,7 +648,7 @@ export default function GuideTable({
                     }}
                     className={focusedOffTargetKey === hitKey ? "located" : ""}>
                     <span className={`offtargetmmbadge mm${Math.min(2, editDistance)}`}>
-                      {editDistance} {activeOffTarget?.advanced ? 'ED' : 'MM'}
+                      {editDistance} {metricType}
                     </span>
                     <span className="offtargetlocus">
                       <strong>chr{chrom}:{start.toLocaleString()}–{targetEnd.toLocaleString()}</strong>

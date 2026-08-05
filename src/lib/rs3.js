@@ -5,6 +5,7 @@
 
 const cache = new Map()
 const CACHE_LIMIT = 5000
+let healthRequest = null
 
 function setCached(k, value) {
   cache.delete(k)
@@ -64,12 +65,14 @@ export async function scoreContexts(contexts, tracr, signal, serverCache = true)
   return { scores, available: payload.available, detail: payload.detail ?? null }
 }
 
-export async function checkRs3Health() {
-  try {
-    const res = await fetch('/api/health')
-    if (!res.ok) return { rs3: false, detail: `service returned ${res.status}` }
-    return await res.json()
-  } catch {
-    return { rs3: false, detail: 'RS3 service not running' }
+export function checkRs3Health() {
+  if (!healthRequest) {
+    healthRequest = fetch('/api/health')
+      .then(async (res) => {
+        if (!res.ok) return { rs3: false, detail: `service returned ${res.status}` }
+        return res.json()
+      })
+      .catch(() => ({ rs3: false, detail: 'RS3 service not running' }))
   }
+  return healthRequest
 }

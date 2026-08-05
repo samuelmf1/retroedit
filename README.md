@@ -49,7 +49,7 @@ donors still designed, but the RS3 column shows `off`.
 
 Users can upload plain DNA, single- or multi-record FASTA, or SnapGene `.dna` files up to 25 MB. SnapGene feature colors and CDS ranges are imported into the sequence viewer; CDS annotations also enable codon, amino-acid, and stop-codon context. The full uploaded file and sequence stay only in browser memory and are released when the page is closed or reloaded—they are never uploaded or written to server storage. Rule Set 3 receives only transient 30-base guide contexts for scoring, with server caching disabled for custom sequences.
 
-Custom mode retains sequence editing, imported and user-created annotations, local guide discovery and off-target search, Rule Set 3 scoring, HDR repair-template design, and export. User annotations can be downloaded with the edited sequence as a SnapGene `.dna` file. Reference-database features such as locus navigation, gnomAD, and ClinVar are omitted.
+Custom mode retains sequence editing, imported and user-created annotations, local guide discovery and off-target search, Rule Set 3 scoring, HDR repair-template design, and export. User annotations can be downloaded with the edited sequence as a SnapGene `.dna` file or a generic GenBank `.gbk` file. Reference-database features such as locus navigation, gnomAD, and ClinVar are omitted.
 
 ## Production
 

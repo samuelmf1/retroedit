@@ -44,11 +44,12 @@ export function EditActions({
 
 export default function EditBar({
   editList, selRange, edits, canUndo, canRedo, onUndo, onRedo, onRevert,
-  onEditFocus, customFeatureCount = 0, onDownloadSnapGene, snapGeneDisabled = false,
+  onEditFocus, customFeatureCount = 0, onDownloadSnapGene, onDownloadGenBank, snapGeneDisabled = false,
   annotationOptions, onAnnotationChange, biotypes, annotationStatus, assembly, inputKey, loadedInputKey,
   showAnnotations = true, sequenceLineMode = 'window', onSequenceLineMode,
   exploreGuides = false, onExploreGuides, sequenceBlocked = false,
   sequenceSearch, onSequenceSearch, sequenceMatches, sequenceMatchIndex, onPreviousSequenceMatch, onNextSequenceMatch,
+  proteinMutationCount = 0, onOpenProteinStructure,
 }) {
   const [hasEditedForInput, setHasEditedForInput] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -176,6 +177,17 @@ export default function EditBar({
       </div>
 
       <div className="editbar-tools">
+      {proteinMutationCount > 0 && (
+        <button type="button" className="proteinstructureopen" onClick={onOpenProteinStructure}
+          title="View edited residues on the AlphaFold reference structure">
+          <svg viewBox="0 0 22 22" aria-hidden="true">
+            <circle cx="5" cy="5" r="2" /><circle cx="16.5" cy="4.5" r="2" />
+            <circle cx="7.5" cy="16.5" r="2" /><circle cx="17" cy="15" r="2" />
+            <path d="M6.7 6.1l7.8-1M6.1 6.8l1 7.6m2.3 1.1l5.7-.5m.8-8.4l.7 6.3M8.8 14.8l6.4-8.3" />
+          </svg>
+          Protein structure <small>{proteinMutationCount}</small>
+        </button>
+      )}
       <button type="button" className={`toolbarshowguides${exploreGuides ? ' active' : ''}`}
         aria-pressed={exploreGuides} disabled={sequenceBlocked}
         title={exploreGuides ? 'Return to edit-specific guides' : 'Calculate guides across the displayed sequence'}
@@ -215,10 +227,16 @@ export default function EditBar({
           )}
         </div>
         {customFeatureCount > 0 && (
-          <button type="button" className="snapgeneexport" onClick={onDownloadSnapGene}
-            disabled={snapGeneDisabled} title="Download the edited sequence with edits and annotations as a SnapGene DNA file">
-            <span aria-hidden="true">↓</span> Save .dna <small>{customFeatureCount}</small>
-          </button>
+          <div className="sequenceexportgroup" role="group" aria-label="Save annotated sequence">
+            <button type="button" className="snapgeneexport" onClick={onDownloadSnapGene}
+              disabled={snapGeneDisabled} title="Download as a SnapGene DNA file">
+              <span aria-hidden="true">↓</span> .dna <small>{customFeatureCount}</small>
+            </button>
+            <button type="button" className="snapgeneexport gbk" onClick={onDownloadGenBank}
+              disabled={snapGeneDisabled} title="Download as a generic GenBank file">
+              <span aria-hidden="true">↓</span> .gbk
+            </button>
+          </div>
         )}
           <div className={`sequencefind${searchOpen ? ' open' : ''}`}>
             <button type="button" className="sequencefind-toggle" aria-label="Find DNA sequence"

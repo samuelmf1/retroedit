@@ -26,8 +26,26 @@ export default function DonorPanel({
   const [lengthDraft, setLengthDraft] = useState('')
   const [cloningExportOpen, setCloningExportOpen] = useState(false)
   const [cloningOverhangs, setCloningOverhangs] = useState({
-    top: '', bottom: '', includeBottom: true, namePattern: '{guide}_{strand}',
+    top: '', top3: '', bottom: '', bottom3: '', includeBottom: true, namePattern: '{guide}_{strand}',
+    scale: '25nm', purification: 'STD',
   })
+  const [gBlockExportOpen, setGBlockExportOpen] = useState(false)
+  const [gBlockOptions, setGBlockOptions] = useState({
+    fivePrimeOverhang: '', threePrimeOverhang: '', namePattern: '{guide}_pWB366',
+  })
+
+  const gBlockDialog = gBlockExportOpen && (
+    <GBlockExportDialog
+      count={libraryCount}
+      options={gBlockOptions}
+      onChange={setGBlockOptions}
+      onClose={() => setGBlockExportOpen(false)}
+      onExport={() => {
+        onExport('idt-gblocks', gBlockOptions)
+        setGBlockExportOpen(false)
+      }}
+    />
+  )
 
   if (!guide) {
     return (
@@ -39,7 +57,8 @@ export default function DonorPanel({
             <button type="button" className="plasmidopen" disabled>View plasmid map</button>
             <button type="button" className="libraryadd" disabled>+ Add to basket</button>
           </div>
-          <ExportActions count={libraryCount} onExport={onExport} onCloningExport={() => setCloningExportOpen(true)} />
+          <ExportActions count={libraryCount} onExport={onExport}
+            onCloningExport={() => setCloningExportOpen(true)} onGBlockExport={() => setGBlockExportOpen(true)} />
         </div>
         {cloningExportOpen && (
           <CloningExportDialog
@@ -50,14 +69,19 @@ export default function DonorPanel({
             onExport={() => {
               onExport('idt-cloning', {
                 topOverhang: cloningOverhangs.top,
+                topThreePrimeOverhang: cloningOverhangs.top3,
                 bottomOverhang: cloningOverhangs.bottom,
+                bottomThreePrimeOverhang: cloningOverhangs.bottom3,
                 includeBottom: cloningOverhangs.includeBottom,
                 namePattern: cloningOverhangs.namePattern,
+                scale: cloningOverhangs.scale,
+                purification: cloningOverhangs.purification,
               })
               setCloningExportOpen(false)
             }}
           />
         )}
+        {gBlockDialog}
       </section>
     )
   }
@@ -244,7 +268,8 @@ export default function DonorPanel({
           </button>
           {!guide.metricsReady && <span className="librarynote">Available when guide metrics finish</span>}
         </div>
-        <ExportActions count={libraryCount} onExport={onExport} onCloningExport={() => setCloningExportOpen(true)} />
+        <ExportActions count={libraryCount} onExport={onExport}
+          onCloningExport={() => setCloningExportOpen(true)} onGBlockExport={() => setGBlockExportOpen(true)} />
       </div>
       {cloningExportOpen && (
         <CloningExportDialog
@@ -255,14 +280,19 @@ export default function DonorPanel({
           onExport={() => {
             onExport('idt-cloning', {
               topOverhang: cloningOverhangs.top,
+              topThreePrimeOverhang: cloningOverhangs.top3,
               bottomOverhang: cloningOverhangs.bottom,
+              bottomThreePrimeOverhang: cloningOverhangs.bottom3,
               includeBottom: cloningOverhangs.includeBottom,
               namePattern: cloningOverhangs.namePattern,
+              scale: cloningOverhangs.scale,
+              purification: cloningOverhangs.purification,
             })
             setCloningExportOpen(false)
           }}
         />
       )}
+      {gBlockDialog}
       {plasmidOpen && (
         <Suspense fallback={(
           <div className="plasmidmodal" role="dialog" aria-modal="true" aria-label="Loading plasmid viewer">
@@ -284,7 +314,39 @@ export default function DonorPanel({
   )
 }
 
-function ExportActions({ count, onExport, onCloningExport }) {
+function ExportActions({ count, onExport, onCloningExport, onGBlockExport }) {
+  const positionMenu = (event) => {
+    const details = event.currentTarget
+    if (!details.open) {
+      details.removeAttribute('data-positioned')
+      return
+    }
+    requestAnimationFrame(() => {
+      const summary = details.querySelector(':scope > summary')
+      const menu = details.querySelector(':scope > .donorexportoptions')
+      if (!summary || !menu || !details.open) return
+      const trigger = summary.getBoundingClientRect()
+      const width = menu.offsetWidth
+      const height = menu.offsetHeight
+      const gap = 7
+      const margin = 8
+      const roomAbove = trigger.top - margin
+      const roomBelow = window.innerHeight - trigger.bottom - margin
+      const openAbove = roomAbove >= height + gap || roomAbove >= roomBelow
+      const top = Math.max(margin, Math.min(
+        window.innerHeight - height - margin,
+        openAbove ? trigger.top - height - gap : trigger.bottom + gap,
+      ))
+      const left = Math.max(margin, Math.min(
+        window.innerWidth - width - margin,
+        trigger.right - width,
+      ))
+      details.style.setProperty('--export-menu-top', `${top}px`)
+      details.style.setProperty('--export-menu-left', `${left}px`)
+      details.setAttribute('data-positioned', 'true')
+    })
+  }
+
   const chooseExport = (event, action) => {
     event.currentTarget.closest('details')?.removeAttribute('open')
     action()
@@ -293,7 +355,7 @@ function ExportActions({ count, onExport, onCloningExport }) {
   return (
     <div className="donorexports">
       <span>{count} in basket</span>
-      <details className="donorexportmenu" name="donor-export-menu">
+      <details className="donorexportmenu" name="donor-export-menu" onToggle={positionMenu}>
         <summary aria-label="Download design files">Download <i aria-hidden="true" /></summary>
         <div className="donorexportoptions" role="menu" aria-label="Download design files">
           <button type="button" role="menuitem" disabled={!count}
@@ -309,9 +371,14 @@ function ExportActions({ count, onExport, onCloningExport }) {
             onClick={(event) => chooseExport(event, () => onExport('dna'))}>
             <span>SnapGene .dna</span><small>Annotated design</small>
           </button>
+          <button type="button" role="menuitem" disabled={!count}
+            title="Generic GenBank file containing the edited locus and every design in the basket"
+            onClick={(event) => chooseExport(event, () => onExport('gbk'))}>
+            <span>GenBank .gbk</span><small>Annotated design</small>
+          </button>
         </div>
       </details>
-      <details className="donorexportmenu" name="donor-export-menu">
+      <details className="donorexportmenu" name="donor-export-menu" onToggle={positionMenu}>
         <summary aria-label="Export files for ordering">Order <i aria-hidden="true" /></summary>
         <div className="donorexportoptions orderoptions" role="menu" aria-label="Export files for ordering">
           <button type="button" role="menuitem" disabled={!count}
@@ -325,9 +392,9 @@ function ExportActions({ count, onExport, onCloningExport }) {
             <span>Cloning oligos</span><small>Configure strands and overhangs</small>
           </button>
           <button type="button" role="menuitem" disabled={!count}
-            title="IDT gBlocks bulk-entry CSV: Name and repair-template Sequence. IDT accepts gBlocks from 125 to 3,000 bp."
-            onClick={(event) => chooseExport(event, () => onExport('idt-gblocks'))}>
-            <span>gBlocks</span><small>Repair-template CSV</small>
+            title="Full designed pWB366 constructs with optional vector-insertion overhangs"
+            onClick={(event) => chooseExport(event, onGBlockExport)}>
+            <span>gBlocks</span><small>Designed pWB366 CSV</small>
           </button>
         </div>
       </details>
@@ -335,18 +402,113 @@ function ExportActions({ count, onExport, onCloningExport }) {
   )
 }
 
+function GBlockExportDialog({ count, options, onChange, onClose, onExport }) {
+  const invalidFivePrime = /[^ACGT]/i.test(options.fivePrimeOverhang)
+  const invalidThreePrime = /[^ACGT]/i.test(options.threePrimeOverhang)
+  const emptyName = !options.namePattern.trim()
+  const duplicateGuides = count > 1 && !options.namePattern.includes('{guide}') && !options.namePattern.includes('{index}')
+  const invalid = invalidFivePrime || invalidThreePrime || emptyName || duplicateGuides
+  const update = (key, value) => onChange({
+    ...options,
+    [key]: value.toUpperCase().replace(/\s+/g, ''),
+  })
+  const previewName = options.namePattern
+    .replaceAll('{guide}', 'fwd_chr11_5227002')
+    .replaceAll('{index}', '1')
+
+  return (
+    <div className="spacermatchbackdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose()
+    }}>
+      <section className="loadconfirmmodal cloningexportmodal gblockexportmodal" role="dialog" aria-modal="true"
+        aria-labelledby="gblock-export-title">
+        <div className="cloningexporthead">
+          <div>
+            <div className="loadconfirmbrand">IDT gBlocks</div>
+            <h2 id="gblock-export-title">Export designed pWB366 constructs</h2>
+          </div>
+          <button type="button" className="spacermatchclose" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <p>Each row contains the complete pWB366 plasmid sequence, linearized at base 1, with that design’s spacer and scaffold after the retained U6 starting G and its repair template after the MSD.</p>
+        <div className="gblocknotice">
+          Optional terminal overhangs can be added for insertion into another vector. Blank fields remain blank.
+        </div>
+        <label className="cloningnamefield">
+          <span>gBlock name pattern</span>
+          <input value={options.namePattern}
+            onChange={(event) => onChange({ ...options, namePattern: event.target.value })}
+            placeholder="{guide}_pWB366" maxLength="120" />
+          <small>Use <code>{'{guide}'}</code> and <code>{'{index}'}</code>. Example: {previewName}</small>
+        </label>
+        <div className="cloningoverhangfields gblockoverhangfields">
+          <label>
+            <span>5′ overhang</span>
+            <input value={options.fivePrimeOverhang}
+              onChange={(event) => update('fivePrimeOverhang', event.target.value)}
+              placeholder="Optional vector-insertion sequence" maxLength="120" autoFocus
+              aria-invalid={invalidFivePrime} />
+          </label>
+          <label>
+            <span>3′ overhang</span>
+            <input value={options.threePrimeOverhang}
+              onChange={(event) => update('threePrimeOverhang', event.target.value)}
+              placeholder="Optional vector-insertion sequence" maxLength="120"
+              aria-invalid={invalidThreePrime} />
+          </label>
+        </div>
+        <small className="gblocksequencepreview">5′–<b>{options.fivePrimeOverhang}</b>{options.fivePrimeOverhang && ' + '}designed pWB366{options.threePrimeOverhang && ' + '}<b>{options.threePrimeOverhang}</b>–3′</small>
+        {(invalidFivePrime || invalidThreePrime) && <div className="cloningoverhangerror" role="alert">Overhangs may contain only A, C, G, and T.</div>}
+        {emptyName && <div className="cloningoverhangerror" role="alert">Enter a gBlock name pattern.</div>}
+        {duplicateGuides && <div className="cloningoverhangerror" role="alert">Add {'{guide}'} or {'{index}'} so each construct has a unique name.</div>}
+        <div className="gblocklengthnote">The designed construct is approximately 2.7 kb before overhangs. Confirm the final sequence length against your synthesis provider’s current limits.</div>
+        <div className="loadconfirmactions">
+          <button type="button" onClick={onClose}>Cancel</button>
+          <button type="button" className="primary" disabled={invalid} onClick={onExport}>Export gBlocks CSV</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function CloningExportDialog({ count, overhangs, onChange, onClose, onExport }) {
   const invalidTop = /[^ACGT]/i.test(overhangs.top)
+  const invalidTop3 = /[^ACGT]/i.test(overhangs.top3)
   const invalidBottom = overhangs.includeBottom && /[^ACGT]/i.test(overhangs.bottom)
+  const invalidBottom3 = overhangs.includeBottom && /[^ACGT]/i.test(overhangs.bottom3)
   const emptyName = !overhangs.namePattern.trim()
   const duplicateStrands = overhangs.includeBottom && !overhangs.namePattern.includes('{strand}')
   const duplicateGuides = count > 1 && !overhangs.namePattern.includes('{guide}') && !overhangs.namePattern.includes('{index}')
-  const invalid = invalidTop || invalidBottom || emptyName || duplicateStrands || duplicateGuides
+  const invalid = invalidTop || invalidTop3 || invalidBottom || invalidBottom3
+    || emptyName || duplicateStrands || duplicateGuides
   const update = (key, value) => onChange({ ...overhangs, [key]: value.toUpperCase().replace(/\s+/g, '') })
   const previewName = (strand) => overhangs.namePattern
     .replaceAll('{guide}', 'fwd_chr11_5227002')
     .replaceAll('{index}', '1')
     .replaceAll('{strand}', strand)
+  const scaleOptions = [
+    ['', 'Leave blank'],
+    ['25nm', '25 nmole'],
+    ['100nm', '100 nmole'],
+    ['250nm', '250 nmole'],
+    ['1um', '1 µmole'],
+    ['2um', '2 µmole'],
+    ['5um', '5 µmole'],
+    ['10um', '10 µmole'],
+    ['4nmU', '4 nmole Ultramer™'],
+    ['20nmU', '20 nmole Ultramer™'],
+    ['PU', 'PAGE Ultramer™'],
+    ['25nmS', '25 nmole Sameday'],
+  ]
+  const purificationOptions = [
+    ['', 'Leave blank'],
+    ['STD', 'Standard Desalting'],
+    ['PAGE', 'PAGE'],
+    ['HPLC', 'HPLC'],
+    ['IEHPLC', 'IE HPLC'],
+    ['RNASE', 'RNase Free HPLC'],
+    ['DUALHPLC', 'Dual HPLC'],
+    ['PAGEHPLC', 'Dual PAGE & HPLC'],
+  ]
 
   return (
     <div className="spacermatchbackdrop" role="presentation" onMouseDown={(event) => {
@@ -361,7 +523,7 @@ function CloningExportDialog({ count, overhangs, onChange, onClose, onExport }) 
           </div>
           <button type="button" className="spacermatchclose" onClick={onClose} aria-label="Close">×</button>
         </div>
-        <p>Exports a forward spacer oligo for every guide in the basket, with an optional reverse-complement bottom strand. Enter only the 5′ cloning overhang for each oligo.</p>
+        <p>Exports a forward spacer oligo for every guide in the basket, with an optional reverse-complement bottom strand. Add optional 5′ and 3′ cloning overhangs; blank fields remain blank.</p>
         <label className="cloningnamefield">
           <span>Oligo name or prefix pattern</span>
           <input value={overhangs.namePattern}
@@ -371,13 +533,41 @@ function CloningExportDialog({ count, overhangs, onChange, onClose, onExport }) 
             Use <code>{'{guide}'}</code>, <code>{'{index}'}</code>, and <code>{'{strand}'}</code>. Example: {previewName('top')}
           </small>
         </label>
-        <div className="cloningoverhangfields">
+        <div className="cloningordersettings" aria-label="IDT order settings">
           <label>
-            <span>Top oligo 5′ overhang</span>
-            <input value={overhangs.top} onChange={(event) => update('top', event.target.value)}
-              placeholder="e.g. CACC" maxLength="40" autoFocus aria-invalid={invalidTop} />
-            <small><b>5′–{overhangs.top || 'OVERHANG'}</b> + spacer–3′</small>
+            <span>Scale</span>
+            <select value={overhangs.scale}
+              onChange={(event) => onChange({ ...overhangs, scale: event.target.value })}>
+              {scaleOptions.map(([code, label]) => (
+                <option key={code || 'blank'} value={code}>{code ? `${code} — ${label}` : label}</option>
+              ))}
+            </select>
           </label>
+          <label>
+            <span>Purification</span>
+            <select value={overhangs.purification}
+              onChange={(event) => onChange({ ...overhangs, purification: event.target.value })}>
+              {purificationOptions.map(([code, label]) => (
+                <option key={code || 'blank'} value={code}>{code ? `${code} — ${label}` : label}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="cloningoverhangfields">
+          <div className="cloningstrandfields">
+            <strong>Top-strand oligo</strong>
+            <label>
+              <span>5′ overhang</span>
+              <input value={overhangs.top} onChange={(event) => update('top', event.target.value)}
+                placeholder="Optional, e.g. CACC" maxLength="40" autoFocus aria-invalid={invalidTop} />
+            </label>
+            <label>
+              <span>3′ overhang</span>
+              <input value={overhangs.top3} onChange={(event) => update('top3', event.target.value)}
+                placeholder="Optional" maxLength="40" aria-invalid={invalidTop3} />
+            </label>
+            <small>5′–<b>{overhangs.top}</b>{overhangs.top && ' + '}spacer{overhangs.top3 && ' + '}<b>{overhangs.top3}</b>–3′</small>
+          </div>
           <div className="cloningbottomoption">
             <label className="cloningbottomtoggle">
               <input type="checkbox" checked={overhangs.includeBottom}
@@ -385,16 +575,23 @@ function CloningExportDialog({ count, overhangs, onChange, onClose, onExport }) 
               <span>Include bottom-strand oligo</span>
             </label>
             {overhangs.includeBottom && (
-              <label>
-                <span>Bottom oligo 5′ overhang</span>
-                <input value={overhangs.bottom} onChange={(event) => update('bottom', event.target.value)}
-                  placeholder="e.g. AAAC" maxLength="40" aria-invalid={invalidBottom} />
-                <small><b>5′–{overhangs.bottom || 'OVERHANG'}</b> + reverse-complement spacer–3′</small>
-              </label>
+              <div className="cloningstrandfields">
+                <label>
+                  <span>5′ overhang</span>
+                  <input value={overhangs.bottom} onChange={(event) => update('bottom', event.target.value)}
+                    placeholder="Optional, e.g. AAAC" maxLength="40" aria-invalid={invalidBottom} />
+                </label>
+                <label>
+                  <span>3′ overhang</span>
+                  <input value={overhangs.bottom3} onChange={(event) => update('bottom3', event.target.value)}
+                    placeholder="Optional" maxLength="40" aria-invalid={invalidBottom3} />
+                </label>
+                <small>5′–<b>{overhangs.bottom}</b>{overhangs.bottom && ' + '}reverse-complement spacer{overhangs.bottom3 && ' + '}<b>{overhangs.bottom3}</b>–3′</small>
+              </div>
             )}
           </div>
         </div>
-        {(invalidTop || invalidBottom) && <div className="cloningoverhangerror" role="alert">Overhangs may contain only A, C, G, and T.</div>}
+        {(invalidTop || invalidTop3 || invalidBottom || invalidBottom3) && <div className="cloningoverhangerror" role="alert">Overhangs may contain only A, C, G, and T.</div>}
         {emptyName && <div className="cloningoverhangerror" role="alert">Enter an oligo name pattern.</div>}
         {duplicateStrands && <div className="cloningoverhangerror" role="alert">Add {'{strand}'} so top and bottom oligos have unique names.</div>}
         {duplicateGuides && <div className="cloningoverhangerror" role="alert">Add {'{guide}'} or {'{index}'} so each guide has a unique name.</div>}

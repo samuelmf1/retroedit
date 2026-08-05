@@ -16,3 +16,4 @@ export function clinvarCategory(value) {
   if (/drug response|risk factor|association|protective/.test(significance)) return 'association'
   return 'other'
 }
+export const DEFAULT_GNOMAD_MAF = 1e-5

@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
-import { CLINVAR_CATEGORIES } from '../lib/variants.js'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { CLINVAR_CATEGORIES, DEFAULT_GNOMAD_MAF } from '../lib/variants.js'
+import { fetchGtexExpression } from '../lib/genomics.js'
 
-export const DEFAULT_GNOMAD_MAF = 1e-5
 const GNOMAD_MAF_STEPS = [
   { value: 1e-7, label: '0.00001%' },
   { value: 1e-6, label: '0.0001%' },
@@ -34,6 +34,93 @@ function mafIndexFor(value) {
 }
 function formatChrom(chrom) {
   return `chr${String(chrom).replace(/^chr/i, '')}`
+}
+
+function formatTpm(value) {
+  if (value >= 1000) return value.toLocaleString(undefined, { maximumFractionDigits: 0 })
+  if (value >= 100) return value.toFixed(1)
+  if (value >= 10) return value.toFixed(2)
+  if (value >= 1) return value.toFixed(2)
+  return value.toFixed(3)
+}
+
+function GtexExpression({ assembly, gene }) {
+  const [requestKey, setRequestKey] = useState(0)
+  const [state, setState] = useState({ status: 'idle', payload: null, error: '' })
+
+  useEffect(() => {
+    if (assembly !== 'GRCh38' || !gene) {
+      setState({ status: 'empty', payload: null, error: '' })
+      return undefined
+    }
+    const controller = new AbortController()
+    setState({ status: 'loading', payload: null, error: '' })
+    fetchGtexExpression(gene, controller.signal).then((payload) => {
+      setState({ status: payload?.rows?.length ? 'ready' : 'empty', payload, error: '' })
+    }).catch((error) => {
+      if (error.name !== 'AbortError') {
+        setState({ status: 'error', payload: null, error: error.message || 'GTEx request failed' })
+      }
+    })
+    return () => controller.abort()
+  }, [assembly, gene, requestKey])
+
+  const tissues = useMemo(() => {
+    const grouped = new Map()
+    for (const row of state.payload?.rows ?? []) {
+      const tissue = row.tissueSiteDetailId || row.tissueSiteDetail || row.tissue || ''
+      const median = Number(row.median)
+      if (!tissue || !Number.isFinite(median)) continue
+      const aggregate = grouped.get(tissue) ?? { sum: 0, count: 0 }
+      aggregate.sum += median
+      aggregate.count += 1
+      grouped.set(tissue, aggregate)
+    }
+    return [...grouped].map(([id, aggregate]) => ({
+      id, label: id.replaceAll('_', ' '), tpm: aggregate.sum / aggregate.count,
+    })).sort((a, b) => b.tpm - a.tpm || a.label.localeCompare(b.label))
+  }, [state.payload])
+
+  const maximum = tissues[0]?.tpm ?? 0
+  return (
+    <section className="gtexpanel" aria-label={`GTEx tissue expression${gene ? ` for ${gene}` : ''}`}>
+      <header>
+        <span><strong>GTEx tissue expression</strong><small>Median TPM</small></span>
+        {state.payload?.gencodeId && <code title="GENCODE v39 · GRCh38">{state.payload.gencodeId}</code>}
+      </header>
+      {state.status === 'loading' && (
+        <div className="gtexloading" role="status" aria-live="polite">
+          <span>Loading GTEx expression…</span>
+          {[82, 61, 44, 30].map((width) => <i key={width} style={{ '--gtex-width': `${width}%` }} />)}
+        </div>
+      )}
+      {state.status === 'error' && (
+        <div className="gtexmessage" role="alert">
+          <span>GTEx expression could not be loaded.</span>
+          <button type="button" onClick={() => setRequestKey((value) => value + 1)}>Retry</button>
+        </div>
+      )}
+      {state.status === 'empty' && (
+        <div className="gtexmessage">
+          {assembly === 'GRCh38' && gene
+            ? 'No GTEx median expression data found.'
+            : 'GTEx expression is available for human GRCh38 genes.'}
+        </div>
+      )}
+      {state.status === 'ready' && (
+        <div className="gtexbars" role="list" aria-label={`${tissues.length} tissues, sorted by median TPM`}>
+          {tissues.map((tissue) => (
+            <div className="gtexbar" role="listitem" key={tissue.id}
+              title={`${tissue.label}: ${formatTpm(tissue.tpm)} TPM`}>
+              <span>{tissue.label}</span>
+              <i><b style={{ width: `${maximum > 0 ? (tissue.tpm / maximum) * 100 : 0}%` }} /></i>
+              <output>{formatTpm(tissue.tpm)}</output>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
 }
 
 
@@ -306,6 +393,9 @@ export default function FeatureRibbon({
   onPanLeft, onPanRight, overviewTargetRef, locusOverview, shownBp,
 }) {
   const currentExon = exonNav?.exons?.[exonNav.index]
+  const expressionGene = assembly === 'GRCh38' && locusOverview?.exons?.length
+    ? locusOverview.label
+    : ''
   const exonLabel = currentExon
     ? `Exon ${currentExon.rank ?? exonNav.index + 1} / ${exonNav.exons.length}`
     : ''
@@ -332,52 +422,55 @@ export default function FeatureRibbon({
   }, [currentExon, exonNav, navigationDisabled, onNextExon, onPanLeft, onPanRight, onPreviousExon])
 
   return (
-    <div className={`featureribbon${navigationDisabled ? ' loading' : ''}${!currentExon ? ' noexon' : ''}`}>
-      <div className="locuscluster">
-        <div className="locusprimary">
-          <div className="locusidentity">
-            <span className="locusname" title={locusOverview?.description || locusOverview?.label}>
-              <strong>{locusOverview?.label}</strong>
-              {locusOverview?.description && <small>{locusOverview.description}</small>}
-            </span>
-            {locusOverview?.strand && (
-              <span className={`genomebar-strand locusstrand ${locusOverview.strand === -1 ? 'rev' : 'fwd'}`}
-                title={locusOverview.strand === -1 ? '− strand · transcribed right to left' : '+ strand · transcribed left to right'}>
-                {locusOverview.strand === -1 ? '← − strand' : '+ strand →'}
+    <div className={`featureribbon${navigationDisabled ? ' loading' : ''}${!currentExon ? ' noexon' : ''}${expressionGene ? '' : ' noexpression'}`}>
+      <section className="locusoverviewpanel" aria-label="Gene overview and navigation">
+        <div className="locuscluster">
+          <div className="locusprimary">
+            <div className="locusidentity">
+              <span className="locusname" title={locusOverview?.description || locusOverview?.label}>
+                <strong>{locusOverview?.label}</strong>
+                {locusOverview?.description && <small>{locusOverview.description}</small>}
               </span>
+              {locusOverview?.strand && (
+                <span className={`genomebar-strand locusstrand ${locusOverview.strand === -1 ? 'rev' : 'fwd'}`}
+                  title={locusOverview.strand === -1 ? '− strand · transcribed right to left' : '+ strand · transcribed left to right'}>
+                  {locusOverview.strand === -1 ? '← − strand' : '+ strand →'}
+                </span>
+              )}
+            </div>
+            {currentExon && (
+              <div className="exonnav" aria-label={`${exonNav.gene.name} canonical transcript navigation`}>
+                <button type="button" className="frchip exonarrow exonpan"
+                  disabled={navigationDisabled} title="Slide left"
+                  aria-label="Slide left" onClick={onPanLeft}>←</button>
+                <button type="button" className="frchip exonarrow exonjump"
+                  disabled={navigationDisabled || exonNav.index <= 0}
+                  title="Snap to previous exon" aria-label="Snap to previous exon"
+                  onClick={onPreviousExon}>⇤</button>
+                <button type="button" className="frchip exoncurrent" disabled={navigationDisabled}
+                  title="Center current exon"
+                  onClick={onSnapExon}>{exonLabel}</button>
+                <button type="button" className="frchip exonarrow exonjump"
+                  disabled={navigationDisabled || exonNav.index >= exonNav.exons.length - 1}
+                  title="Snap to next exon" aria-label="Snap to next exon"
+                  onClick={onNextExon}>⇥</button>
+                <button type="button" className="frchip exonarrow exonpan"
+                  disabled={navigationDisabled} title="Slide right"
+                  aria-label="Slide right" onClick={onPanRight}>→</button>
+              </div>
             )}
           </div>
-          {currentExon && (
-            <div className="exonnav" aria-label={`${exonNav.gene.name} canonical transcript navigation`}>
-              <button type="button" className="frchip exonarrow exonpan"
-                disabled={navigationDisabled} title="Slide left"
-                aria-label="Slide left" onClick={onPanLeft}>←</button>
-              <button type="button" className="frchip exonarrow exonjump"
-                disabled={navigationDisabled || exonNav.index <= 0}
-                title="Snap to previous exon" aria-label="Snap to previous exon"
-                onClick={onPreviousExon}>⇤</button>
-              <button type="button" className="frchip exoncurrent" disabled={navigationDisabled}
-                title="Center current exon"
-                onClick={onSnapExon}>{exonLabel}</button>
-              <button type="button" className="frchip exonarrow exonjump"
-                disabled={navigationDisabled || exonNav.index >= exonNav.exons.length - 1}
-                title="Snap to next exon" aria-label="Snap to next exon"
-                onClick={onNextExon}>⇥</button>
-              <button type="button" className="frchip exonarrow exonpan"
-                disabled={navigationDisabled} title="Slide right"
-                aria-label="Slide right" onClick={onPanRight}>→</button>
+          {locusOverview && (
+            <div className="locusrange">
+              <strong>{Number(shownBp || 0).toLocaleString()} bp window</strong>
+              <span aria-hidden="true"> · </span>
+              {formatChrom(locusOverview.chrom)}:{locusOverview.start.toLocaleString()}–{locusOverview.end.toLocaleString()}
             </div>
           )}
         </div>
-        {locusOverview && (
-          <div className="locusrange">
-            <strong>{Number(shownBp || 0).toLocaleString()} bp window</strong>
-            <span aria-hidden="true"> · </span>
-            {formatChrom(locusOverview.chrom)}:{locusOverview.start.toLocaleString()}–{locusOverview.end.toLocaleString()}
-          </div>
-        )}
-      </div>
-      <div className="overviewslot" ref={overviewTargetRef} />
+        <div className="overviewslot" ref={overviewTargetRef} />
+      </section>
+      {expressionGene && <GtexExpression assembly={assembly} gene={expressionGene} />}
     </div>
   )
 }

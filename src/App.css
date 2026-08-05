@@ -401,6 +401,12 @@
   align-items: center; justify-content: center; border-radius: 999px;
   background: rgba(255, 255, 255, .22); color: #fff; font-size: 8px; font-weight: 800; line-height: 14px;
 }
+.sequenceexportgroup { flex: none; display: inline-flex; align-items: stretch; }
+.sequenceexportgroup .snapgeneexport { border-radius: 0; box-shadow: 0 2px 8px rgba(47, 111, 240, .16); }
+.sequenceexportgroup .snapgeneexport:first-child { border-radius: 8px 0 0 8px; }
+.sequenceexportgroup .snapgeneexport:last-child { margin-left: -1px; border-radius: 0 8px 8px 0; }
+.sequenceexportgroup .snapgeneexport.gbk { background: #f4f8ff; color: #245fc8; }
+.sequenceexportgroup .snapgeneexport.gbk:hover:not(:disabled) { background: #dce9ff; color: #174da9; }
 .sequencelayout {
   flex: none; display: inline-flex; padding: 2px; gap: 2px;
   border: 1px solid #b9c8d6; border-radius: 9px; background: #eef3f7;
@@ -1012,6 +1018,13 @@
 .codontrack .cc { position: absolute; top: 0; width: 9px; height: 16px; line-height: 16px; text-align: center; font-weight: 700; color: #334; }
 .codontrack .cc.p0 { background: #eef2f7; }
 .codontrack .cc.p1 { background: #dbe6ef; }
+.codontrack .cc.split-left::before,
+.codontrack .cc.split-right::after {
+  content: ''; position: absolute; top: 2px; bottom: 2px; width: 3px;
+  background: var(--accent); border-radius: 2px; opacity: .82;
+}
+.codontrack .cc.split-left::before { left: 0; }
+.codontrack .cc.split-right::after { right: 0; }
 .codontrack .cc.changed { color: #b42318; font-weight: 800; box-shadow: inset 0 -2px 0 #d8352a; }
 .codontrack .cc.stop {
   z-index: 3; border-radius: 3px; background: #dc3a30; color: #fff;
@@ -1386,6 +1399,10 @@
   padding: 5px; border: 1px solid #b8c8d7; border-radius: 10px; background: #fff;
   box-shadow: 0 10px 28px #25384f2b;
 }
+.donorexportmenu[data-positioned="true"] .donorexportoptions {
+  position: fixed; left: var(--export-menu-left); top: var(--export-menu-top); right: auto; bottom: auto;
+  z-index: 1000;
+}
 .donorexportoptions.orderoptions { width: 230px; }
 .donorexportoptions button {
   display: grid; gap: 2px; width: 100%; min-width: 0; padding: 8px 10px; border-color: transparent;
@@ -1402,30 +1419,56 @@
 .cloningnamefield { display: grid; gap: 6px; margin-top: 18px; color: var(--ink); font-size: 11px; font-weight: 750; }
 .cloningnamefield input {
   width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid #b8c8d7; border-radius: 9px;
-  background: #fff; color: var(--ink); font: 650 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #fff; color: var(--ink); font: 650 12px/1.2 var(--mono);
 }
 .cloningnamefield input:focus { border-color: var(--accent); outline: 3px solid #2f6ff020; }
 .cloningnamefield small { color: var(--muted); font-size: 9.5px; font-weight: 500; overflow-wrap: anywhere; }
 .cloningnamefield code { color: var(--accent); font-size: inherit; font-weight: 750; }
 .cloningoverhangfields { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 18px; }
 .cloningoverhangfields label { display: grid; gap: 6px; color: var(--ink); font-size: 11px; font-weight: 750; }
+.cloningordersettings {
+  display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:14px;
+  padding:12px; border:1px solid var(--line); border-radius:10px; background:#f6f9fc;
+}
+.cloningordersettings label { display:grid; gap:6px; color:var(--ink); font-size:11px; font-weight:750; }
+.cloningordersettings select {
+  width:100%; min-height:36px; padding:6px 30px 6px 10px; border:1px solid var(--line-strong);
+  border-radius:8px; background:var(--panel); color:var(--ink); font:inherit; font-weight:650;
+}
+.cloningordersettings select:focus { border-color:var(--accent); outline:3px solid #2f6ff020; }
+.cloningstrandfields { display:grid; align-content:start; gap:8px; }
+.cloningstrandfields>strong { color:var(--ink); font-size:11px; }
+.cloningbottomoption { display:grid; align-content:start; gap:8px; }
 .cloningbottomoption { display: grid; align-content: start; gap: 9px; }
 .cloningoverhangfields .cloningbottomtoggle { display: flex; align-items: center; gap: 8px; min-height: 22px; cursor: pointer; }
 .cloningoverhangfields .cloningbottomtoggle input { width: 16px; min-height: 16px; margin: 0; padding: 0; accent-color: var(--accent); }
 .cloningoverhangfields input {
   width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid #b8c8d7; border-radius: 9px;
-  background: #fff; color: var(--ink); font: 700 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #fff; color: var(--ink); font: 700 12px/1.2 var(--mono);
   letter-spacing: .05em; text-transform: uppercase;
 }
 .cloningoverhangfields input:focus { border-color: var(--accent); outline: 3px solid #2f6ff020; }
 .cloningoverhangfields input[aria-invalid="true"] { border-color: #d83a32; outline-color: #d83a3220; }
 .cloningoverhangfields small { color: var(--muted); font-size: 9.5px; font-weight: 500; overflow-wrap: anywhere; }
 .cloningoverhangfields small b { color: var(--accent); }
+.gblocknotice, .gblocklengthnote {
+  margin-top: 12px; padding: 9px 11px; border: 1px solid #c8d9ef; border-radius: 9px;
+  background: #f0f6ff; color: var(--text); font-size: 10.5px; line-height: 1.45;
+}
+.gblocksequencepreview { display: block; margin-top: 9px; color: var(--muted); font-size: 9.5px; overflow-wrap: anywhere; }
+.gblocksequencepreview b { color: var(--accent); font-family: var(--mono); }
+.gblocklengthnote { border-color: #ead49a; background: #fff8e7; color: #805a10; }
 .cloningoverhangerror { margin-top: 12px; padding: 8px 10px; border-radius: 8px; background: #fff0ef; color: #b92c25; font-size: 11px; font-weight: 700; }
-@media (max-width: 560px) { .cloningoverhangfields { grid-template-columns: 1fr; } }
+@media (max-width: 560px) {
+  .cloningoverhangfields, .cloningordersettings { grid-template-columns: 1fr; }
+}
 :root[data-theme="dark"] .cloningoverhangfields input { background: #101e25; border-color: #46606d; color: #e5edf2; }
+:root[data-theme="dark"] .cloningordersettings { border-color:#344b56; background:#17262d; }
+:root[data-theme="dark"] .cloningordersettings select { border-color:#46606d; background:#101e25; color:#e5edf2; }
 :root[data-theme="dark"] .cloningnamefield input { background: #101e25; border-color: #46606d; color: #e5edf2; }
 :root[data-theme="dark"] .cloningoverhangerror { background: #40221f; color: #ffaaa4; }
+:root[data-theme="dark"] .gblocknotice { border-color:#35546e; background:#132735; color:#d5e5ef; }
+:root[data-theme="dark"] .gblocklengthnote { border-color:#67552b; background:#322b1b; color:#f2d28b; }
 
 /* interactive plasmid map */
 .plasmidmapview { min-height: 100%; }
@@ -1541,20 +1584,26 @@
 /* Gene identity and navigation sit above the centered interactive gene overview. */
 .featureribbon,
 .featureribbon.noexon {
-  width: 75%; margin-inline: auto; padding: 7px 9px 8px;
-  grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto auto;
-  row-gap: 7px;
+  width: 75%; margin-inline: auto; padding: 0;
+  grid-template-columns: minmax(0, 1.85fr) minmax(250px, .75fr);
+  grid-template-rows: 112px; gap: 8px; align-items: stretch;
+  border: 0; border-radius: 0; background: transparent; box-shadow: none;
+}
+.featureribbon.noexpression { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; }
+.locusoverviewpanel {
+  grid-column: 1; min-width: 0; padding: 7px 9px 8px;
+  display: grid; grid-template-rows: auto minmax(0, 1fr); row-gap: 7px;
   border: 1px solid #b7c8d6; border-radius: 11px; background: #f1f8fb;
   box-shadow: inset 0 1px 0 #fff, 0 3px 10px rgba(25, 52, 74, .09);
 }
 .locuscluster {
   grid-column: 1; grid-row: 1; width: 100%; min-width: 0; justify-self: stretch;
-  display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  align-items: center; gap: 12px; padding-inline: 3px;
+  display: grid; grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center; column-gap: 18px; padding-inline: 3px;
 }
 .locusprimary {
-  grid-column: 2; min-width: 0; display: flex; align-items: center; justify-content: center; gap: 10px;
+  grid-column: 1; min-width: 0; justify-self: center;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
 }
 .locusidentity {
   grid-column: auto; grid-row: auto; flex: none;
@@ -1580,17 +1629,58 @@
 }
 .exonnav { grid-column: auto; grid-row: auto; flex: none; }
 .locusrange {
-  grid-column: 3; justify-self: end;
-  max-width: 420px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  grid-column: 2; justify-self: end;
+  max-width: none; min-width: max-content; overflow: visible; white-space: nowrap;
   color: var(--muted); font-size: 9.5px; line-height: 12px; font-variant-numeric: tabular-nums;
 }
 .locusrange strong { color: #46586a; font-weight: 600; }
 .overviewslot,
 .featureribbon.noexon .overviewslot {
-  grid-column: 1; grid-row: 2; width: 100%; justify-self: stretch;
+  grid-column: 1; grid-row: 2; width: 100%; min-height: 0; justify-self: stretch;
   padding: 5px 8px; border-color: #c2d1dc; border-radius: 8px; background: #fbfdfe;
   box-shadow: inset 0 1px 2px rgba(35, 63, 86, .05);
 }
+.featureribbon > .gtexpanel { grid-column: 2; grid-row: 1; max-height: none; }
+.featureribbon.noexpression .locusoverviewpanel { min-height: 70px; }
+.gtexpanel {
+  min-width: 0; max-height: 112px; overflow: hidden;
+  display: flex; flex-direction: column;
+  border: 1px solid #c2d1dc; border-radius: 8px; background: #fbfdfe;
+  box-shadow: inset 0 1px 2px rgba(35, 63, 86, .05);
+}
+.gtexpanel header {
+  min-height: 29px; padding: 5px 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  border-bottom: 1px solid #d7e2ea; background: #f3f8fb;
+}
+.gtexpanel header > span { min-width: 0; display: flex; align-items: baseline; gap: 6px; }
+.gtexpanel header strong { color: #40566b; font-size: 9px; line-height: 12px; letter-spacing: .06em; text-transform: uppercase; }
+.gtexpanel header small { color: #76899b; font-size: 8px; line-height: 10px; white-space: nowrap; }
+.gtexpanel header code {
+  max-width: 125px; overflow: hidden; color: #60758a; font: 600 8px var(--mono); text-overflow: ellipsis; white-space: nowrap;
+}
+.gtexbars { min-height: 0; padding: 4px 7px 6px; overflow-y: auto; scrollbar-width: thin; }
+.gtexbar {
+  min-height: 17px; display: grid; grid-template-columns: minmax(72px, 1fr) minmax(58px, 1.25fr) 43px;
+  align-items: center; gap: 6px; color: #506579; font-size: 8px; line-height: 11px;
+}
+.gtexbar > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gtexbar > i { height: 7px; overflow: hidden; border-radius: 999px; background: #e1eaf0; }
+.gtexbar > i > b { height: 100%; display: block; border-radius: inherit; background: linear-gradient(90deg, #2f6fed, #2aa4b8); }
+.gtexbar output { color: #31485e; font-size: 8px; font-variant-numeric: tabular-nums; text-align: right; }
+.gtexbar output::after { content: ' TPM'; color: #8495a5; font-size: 6.5px; }
+.gtexloading { padding: 6px 8px; display: grid; grid-template-columns: 1fr 1.2fr; gap: 4px 7px; color: #70859a; font-size: 8px; }
+.gtexloading span { grid-row: 1 / span 4; align-self: center; }
+.gtexloading i {
+  width: var(--gtex-width); height: 7px; border-radius: 999px;
+  background: linear-gradient(100deg, #e1e9ef 25%, #f8fbfd 45%, #e1e9ef 65%); background-size: 220% 100%;
+  animation: gtex-shimmer 1.25s linear infinite;
+}
+@keyframes gtex-shimmer { to { background-position-x: -220%; } }
+.gtexmessage {
+  flex: 1; padding: 8px; display: flex; align-items: center; justify-content: center; gap: 8px;
+  color: #70859a; font-size: 8.5px; text-align: center;
+}
+.gtexmessage button { padding: 3px 7px; color: var(--accent); font-size: 8px; font-weight: 700; }
 .genomebar.top {
   grid-template-columns: auto minmax(0, 1fr) auto;
   grid-template-rows: minmax(18px, 1fr);
@@ -1651,7 +1741,7 @@
 @media (max-width: 850px) {
   .locusname small { display: none; }
   .featureribbon,
-  .featureribbon.noexon { width: 100%; grid-template-columns: minmax(0, 1fr); row-gap: 7px; }
+  .featureribbon.noexon { width: 100%; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; row-gap: 8px; }
   .locuscluster {
     grid-column: 1; width: 100%; display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 8px;
   }
@@ -1661,6 +1751,7 @@
   .featureribbon.noexon .overviewslot { grid-column: 1; grid-row: 2; width: 100%; }
   .genomebar-context { min-width: 84px; }
   .genomebar-hint { display: none; }
+  .featureribbon > .gtexpanel { grid-column: 1; grid-row: 2; min-height: 100px; max-height: 120px; }
 }
 
 /* Taller interactive gene overview diagram and selection window. */
@@ -1799,7 +1890,9 @@
   background: #fff; color: var(--ink);
 }
 .aaeditcodons .codonbases { font: 800 15px/1 var(--mono); }
-.aaeditcodons button small { color: var(--muted); font: 700 8px/1 var(--sans); letter-spacing: .04em; text-transform: uppercase; }
+.aaeditcodons button small { color: var(--muted); font: 700 8px/1.15 var(--sans); letter-spacing: .04em; text-transform: uppercase; }
+.aaeditcodons .aaeditusage { display: flex; min-height: 20px; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
+.aaeditcodons .aaeditusage strong { color: var(--accent); font: inherit; }
 .aaeditcodons button.recommended { border-color: #86a8e5; }
 .aaeditcodons button:hover, .aaeditcodons button:focus-visible { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px #2f6ff020; }
 .aaeditcodons button.selected { border-color: var(--accent); background: var(--accent-weak); color: #174fac; }
@@ -2238,7 +2331,23 @@
   position: relative; width: 8px; min-height: 14px; border: 1px solid #879bab; border-radius: 6px;
   background: linear-gradient(to bottom, #9fb2c1 0 46%, #e7eef3 46% 54%, #9fb2c1 54% 100%);
   box-shadow: inset 0 0 0 1px #fff8;
+  transition: background-color .25s ease, border-color .25s ease, box-shadow .25s ease;
 }
+.offtargetchromosome.scan-complete .offtargetchromosomebody {
+  border-color: #187f8e;
+  background: linear-gradient(to bottom, #20a7b8 0 46%, #c9f3f5 46% 54%, #20a7b8 54% 100%);
+  box-shadow: inset 0 0 0 1px #fff9, 0 0 0 2px #20a7b826;
+}
+.offtargetchromosome.scan-complete > span { color: #16717f; font-weight: 800; }
+.offtargetchromosome.scan-current .offtargetchromosomebody {
+  border-color: #2f6fed;
+  background: linear-gradient(110deg, #9fb2c1 15%, #5c91f5 42%, #d6e4ff 55%, #5c91f5 68%, #9fb2c1 90%);
+  background-size: 260% 100%;
+  box-shadow: 0 0 0 3px #2f6fed2d, 0 0 10px #2f6fed55;
+  animation: chromosomeScan 1s linear infinite;
+}
+.offtargetchromosome.scan-current > span { color: var(--accent); font-weight: 900; }
+@keyframes chromosomeScan { to { background-position: -160% 0; } }
 .offtargetchromosomemarker {
   position: absolute; z-index: 2; width: 14px; height: 14px; min-width: 0; min-height: 0; padding: 0;
   border: 0; border-radius: 50%; background: transparent; transform: translateY(-50%); cursor: pointer;
@@ -2325,7 +2434,7 @@
 .offtargetalignmentseq { display: grid; grid-template-columns: 38px max-content; align-items: center; column-gap: 8px; }
 .offtargetalignmentseq > span { font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .offtargetalignment code {
-  color: #344b60; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  color: #344b60; font-family: var(--mono);
   font-size: 11px; font-weight: 700; letter-spacing: 0; white-space: nowrap;
 }
 .offtargetalignment code i {
@@ -2384,6 +2493,11 @@
   background-size: 260% 100%;
 }
 :root[data-theme="dark"] .advancedofftargeterror { background: #421f21; border-color: #86413f; color: #ffb8b2; }
+:root[data-theme="dark"] .offtargetchromosome.scan-complete .offtargetchromosomebody {
+  border-color: #51cad6;
+  background: linear-gradient(to bottom, #178b99 0 46%, #a8e7eb 46% 54%, #178b99 54% 100%);
+}
+:root[data-theme="dark"] .offtargetchromosome.scan-complete > span { color: #7adbe3; }
 :root[data-theme="dark"] .offtargetbulgetag,
 :root[data-theme="dark"] .offtargetalignment code i.bulge { background: #33245a; color: #c9b6ff; }
 .offtargetminigene {
@@ -2695,6 +2809,13 @@
 :root[data-theme="dark"] .libraryreminderoption { background: #202d34; color: #d3dde3; border-color: #3b505b; }
 :root[data-theme="dark"] .sequencevalidation { background: #3a211f; color: #ffb6b0; border-bottom-color: #78413c; }
 :root[data-theme="dark"] .sequencevalidation strong { color: #ffd0cc; }
+
+.proteinchunkloading {
+  display: grid;
+  place-items: center;
+  color: #dceaff;
+  font-weight: 750;
+}
 :root[data-theme="dark"] .selectionbar .addfeaturebtn { background: #172329; }
 :root[data-theme="dark"] .toolbaraddfeature,
 :root[data-theme="dark"] .editmenu > summary { background: #17242b; border-color: #405762; color: #afbdc6; }
@@ -2705,6 +2826,12 @@
 :root[data-theme="dark"] .snapgeneexport:hover:not(:disabled) { background: #245ed0; color: #fff; }
 :root[data-theme="dark"] .snapgeneexport {
   border-color: #4f84ef; background: #326fe8; color: #fff; box-shadow: 0 2px 10px #07132699;
+}
+:root[data-theme="dark"] .sequenceexportgroup .snapgeneexport.gbk {
+  border-color: #4f6880; background: #17283a; color: #9bbcff;
+}
+:root[data-theme="dark"] .sequenceexportgroup .snapgeneexport.gbk:hover:not(:disabled) {
+  border-color: #6386b9; background: #203c5b; color: #c1d5ff;
 }
 :root[data-theme="dark"] .toolbarshowguides {
   background: #17283a; border-color: #496783; color: #8bb2ff;
@@ -2841,3 +2968,79 @@
 :root[data-theme="dark"] .fbar.utr { color: #b6c8d1; }
 :root[data-theme="dark"] .fbar.utr::before { background: #435862; border-color: #607984; }
 :root[data-theme="dark"] .fbar.utr span { background: rgba(18, 24, 27, .96); }
+:root[data-theme="dark"] .gtexpanel,
+:root[data-theme="dark"] .locusoverviewpanel {
+  border-color: #344a55; background: #14252c;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04), 0 2px 7px rgba(0, 0, 0, .35);
+}
+:root[data-theme="dark"] .gtexpanel header { border-color: #344a55; background: #182b33; }
+:root[data-theme="dark"] .gtexpanel header strong,
+:root[data-theme="dark"] .gtexbar output { color: #d9e7ed; }
+:root[data-theme="dark"] .gtexpanel header small,
+:root[data-theme="dark"] .gtexpanel header code,
+:root[data-theme="dark"] .gtexbar,
+:root[data-theme="dark"] .gtexmessage,
+:root[data-theme="dark"] .gtexloading { color: #9fb3bf; }
+:root[data-theme="dark"] .gtexbar > i { background: #2a3c45; }
+:root[data-theme="dark"] .gtexbar > i > b { background: linear-gradient(90deg, #5f91ff, #43bfd0); }
+:root[data-theme="dark"] .gtexloading i {
+  background: linear-gradient(100deg, #263b45 25%, #3c535d 45%, #263b45 65%); background-size: 220% 100%;
+}
+
+/* AlphaFold structure viewer: loaded only when requested. */
+.protein-modal-open { overflow:hidden; }
+.proteinstructureopen {
+  display:inline-flex; align-items:center; gap:5px; min-height:31px; padding:4px 8px;
+  border-color:#99b8f5; border-radius:8px; background:#edf3ff; color:var(--accent);
+  font-size:10px; font-weight:750; line-height:1; white-space:nowrap;
+}
+.proteinstructureopen:hover:not(:disabled) { background:#dfeaff; }
+.proteinstructureopen svg { width:14px; height:14px; flex:none; fill:none; stroke:currentColor; stroke-width:1.8; }
+.proteinstructureopen small {
+  min-width:16px; padding:1px 4px; border-radius:999px; background:#dce8ff; color:#245fd4;
+  font-size:8px; font-weight:850; line-height:14px; text-align:center;
+}
+.proteinmodal { position:fixed; inset:0; z-index:3100; display:flex; flex-direction:column; background:#e9f2f7; color:var(--ink); }
+.proteinmodalhead { min-height:62px; display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:18px; padding:0 20px; border-bottom:1px solid var(--line-strong); background:#fbfdff; box-shadow:0 3px 14px #20334c16; }
+.proteinmodalhead>div { display:flex; align-items:baseline; gap:10px; min-width:0; }
+.proteinmodalhead>div strong { font-size:18px; }
+.proteinmodalhead>div span { overflow:hidden; color:var(--muted); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+.proteinmodalhead nav { display:flex; gap:7px; }
+.proteinmodalhead nav button { font-weight:700; }
+.proteinclose { display:inline-flex; align-items:center; gap:7px; border-color:#91b0d0; background:#eaf4fb; color:#244765; font-weight:800; }
+.proteinclose span { color:var(--accent); font-size:18px; line-height:.8; }
+.proteinmodalbody { min-height:0; flex:1; display:grid; grid-template-columns:minmax(0,1fr) 310px; gap:16px; padding:16px; }
+.proteinviewport { position:relative; min-width:0; min-height:500px; overflow:hidden; border:1px solid var(--line-strong); border-radius:16px; background:#f3f8fb; box-shadow:0 10px 35px #21395112; }
+.proteinngl { position:absolute; inset:0; }
+.proteinloading,.proteinerror { position:absolute; inset:0; display:grid; place-content:center; justify-items:center; gap:8px; padding:30px; background:#edf5f9; text-align:center; }
+.proteinloading strong,.proteinerror strong { font-size:17px; }
+.proteinloading span,.proteinerror span { max-width:420px; color:var(--muted); font-size:12px; line-height:1.5; }
+.proteinloading i { width:64px; height:64px; border-radius:50%; background:conic-gradient(from 30deg,#3775ed,#80b8e1,#ec4b42,#3775ed); -webkit-mask:radial-gradient(circle,transparent 52%,#000 54%); mask:radial-gradient(circle,transparent 52%,#000 54%); animation:proteinspin 1.2s linear infinite; }
+@keyframes proteinspin { to { transform:rotate(360deg); } }
+.proteinhint { position:absolute; left:50%; bottom:14px; transform:translateX(-50%); padding:7px 11px; border:1px solid #b9c9d7; border-radius:999px; background:#ffffffdf; color:#52677b; box-shadow:0 4px 16px #1d354c1c; white-space:nowrap; }
+.proteininspector { min-height:0; overflow:auto; display:flex; flex-direction:column; gap:15px; padding:17px; border:1px solid var(--line-strong); border-radius:16px; background:#fbfdff; box-shadow:0 10px 35px #21395112; }
+.proteinsource { display:grid; gap:2px; padding-bottom:14px; border-bottom:1px solid var(--line); }
+.proteinsource span { color:var(--muted); font-size:10px; font-weight:750; letter-spacing:.08em; text-transform:uppercase; }
+.proteinsource strong { margin-top:3px; font-size:16px; }
+.proteinsource small { color:var(--muted); }
+.proteininspector h3 { display:flex; align-items:center; gap:8px; margin:0 0 8px; font-size:13px; }
+.proteininspector h3 b { padding:2px 6px; border-radius:999px; background:#e4edff; color:var(--accent); font-size:9px; }
+.proteinmutations { display:grid; gap:5px; }
+.proteinmutations button { display:grid; grid-template-columns:9px 1fr; align-items:center; gap:9px; width:100%; padding:9px; border-color:transparent; text-align:left; }
+.proteinmutations button:hover { border-color:#ed938d; background:#fff3f2; }
+.proteinmutations i { width:9px; height:9px; border-radius:50%; background:#ed3b34; box-shadow:0 0 0 3px #fbd4d1; }
+.proteinmutations span { display:grid; gap:1px; }
+.proteinmutations strong { font-family:var(--mono); font-size:12px; }
+.proteinmutations small { color:var(--muted); font-size:10px; }
+.proteinreference { margin:auto 0 0; color:var(--muted); font-size:10.5px; line-height:1.5; }
+.proteinalphafold { display:flex; justify-content:space-between; gap:8px; padding:10px 11px; border:1px solid #91b0d0; border-radius:8px; background:#edf5fb; color:#245e9a; font-size:11px; font-weight:750; text-decoration:none; }
+:root[data-theme="dark"] .proteinstructureopen { border-color:#416fa6; background:#182d3d; color:#86b4ff; }
+:root[data-theme="dark"] .proteinstructureopen small { background:#263f60; color:#a8c9ff; }
+:root[data-theme="dark"] .proteinmodal { background:#0d171c; }
+:root[data-theme="dark"] .proteinmodalhead,:root[data-theme="dark"] .proteininspector { background:#142229; }
+:root[data-theme="dark"] .proteinviewport,:root[data-theme="dark"] .proteinloading,:root[data-theme="dark"] .proteinerror { background:#101b20; }
+:root[data-theme="dark"] .proteinhint { border-color:#426070; background:#15262de8; color:#bdced7; }
+:root[data-theme="dark"] .proteinmutations button:hover { border-color:#a34d49; background:#32201f; }
+:root[data-theme="dark"] .proteinalphafold { border-color:#416982; background:#172c36; color:#8fc7f0; }
+@media (max-width:850px) { .proteinmodalhead{grid-template-columns:auto 1fr;padding:8px 12px}.proteinmodalhead nav{grid-column:1/-1}.proteinmodalbody{grid-template-columns:1fr}.proteinviewport{min-height:55vh}.proteininspector{max-height:34vh} }
+@media (prefers-reduced-motion:reduce) { .proteinloading i { animation:none; } }

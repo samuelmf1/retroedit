@@ -8,12 +8,27 @@ const spacerMatchCache = new Map()
 const canonicalExonRequests = new Map()
 const geneSuggestionCache = new Map()
 const nearbyFeatureCache = new Map()
+const nearbyFeatureRequests = new Map()
 const variantCache = new Map()
+const variantRequests = new Map()
+const gtexExpressionCache = new Map()
+const gtexExpressionRequests = new Map()
+const proteinStructureRequests = new Map()
 let statusRequest = null
 function setBounded(cache, key, value, limit = CLIENT_CACHE_LIMIT) {
   cache.delete(key)
   cache.set(key, value)
   while (cache.size > limit) cache.delete(cache.keys().next().value)
+}
+
+function waitForSharedRequest(request, signal) {
+  if (!signal) return request
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'))
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(new DOMException('Aborted', 'AbortError'))
+    signal.addEventListener('abort', abort, { once: true })
+    request.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+  })
 }
 
 export function genomicsStatus() {
@@ -46,6 +61,28 @@ export function fetchCanonicalExons({ assembly, gene }) {
   return canonicalExonRequests.get(key)
 }
 
+export function fetchProteinStructure({ assembly, gene }, signal) {
+  const key = `${assembly}|${gene.trim().toUpperCase()}`
+  let request = proteinStructureRequests.get(key)
+  if (!request) {
+    const params = new URLSearchParams({ assembly, gene })
+    request = fetch(`/api/genomics/protein-structure?${params}`)
+      .then(async (response) => {
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null)
+          throw new Error(payload?.detail || `Protein structure service returned ${response.status}`)
+        }
+        return response.json()
+      })
+      .catch((error) => {
+        proteinStructureRequests.delete(key)
+        throw error
+      })
+    setBounded(proteinStructureRequests, key, request, 256)
+  }
+  return waitForSharedRequest(request, signal)
+}
+
 export async function fetchGeneSuggestions({ assembly, query, limit = 8 }, signal) {
   const term = query.trim()
   const key = `${assembly}|${term.toUpperCase()}|${limit}`
@@ -73,44 +110,53 @@ export async function fetchNearbyFeatures({ assembly, chrom, start, end }, signa
     setBounded(nearbyFeatureCache, key, cached)
     return cached
   }
-  try {
-    const params = new URLSearchParams({
-      assembly, chrom: String(chrom), start: String(start), end: String(end),
-    })
-    const response = await fetch(`/api/genomics/annotations?${params}`, { signal })
-    if (!response.ok) throw new Error(String(response.status))
-    const features = (await response.json()).features
+  let request = nearbyFeatureRequests.get(key)
+  if (!request) {
+    request = (async () => {
+      try {
+        const params = new URLSearchParams({
+          assembly, chrom: String(chrom), start: String(start), end: String(end),
+        })
+        const response = await fetch(`/api/genomics/annotations?${params}`)
+        if (!response.ok) throw new Error(String(response.status))
+        const features = (await response.json()).features
 
-    const exonsByTranscript = new Map()
-    features.exons.forEach((exon) => {
-      const list = exonsByTranscript.get(exon.transcript) ?? []
-      list.push(exon)
-      exonsByTranscript.set(exon.transcript, list)
-    })
-    const transcriptsByGene = new Map()
-    features.transcripts.forEach((transcript) => {
-      const list = transcriptsByGene.get(transcript.gene) ?? []
-      list.push(transcript)
-      transcriptsByGene.set(transcript.gene, list)
-    })
+        const exonsByTranscript = new Map()
+        features.exons.forEach((exon) => {
+          const list = exonsByTranscript.get(exon.transcript) ?? []
+          list.push(exon)
+          exonsByTranscript.set(exon.transcript, list)
+        })
+        const transcriptsByGene = new Map()
+        features.transcripts.forEach((transcript) => {
+          const list = transcriptsByGene.get(transcript.gene) ?? []
+          list.push(transcript)
+          transcriptsByGene.set(transcript.gene, list)
+        })
 
-    const result = features.genes.map((gene) => {
-      const candidates = transcriptsByGene.get(gene.id) ?? []
-      const transcript = candidates.sort((a, b) => (
-        Number(b.isCanonical) - Number(a.isCanonical) ||
-        (b.end - b.start) - (a.end - a.start)
-      ))[0]
-      return {
-        ...gene,
-        exons: transcript ? (exonsByTranscript.get(transcript.id) ?? []) : [],
+        const result = features.genes.map((gene) => {
+          const candidates = transcriptsByGene.get(gene.id) ?? []
+          const transcript = candidates.sort((a, b) => (
+            Number(b.isCanonical) - Number(a.isCanonical) ||
+            (b.end - b.start) - (a.end - a.start)
+          ))[0]
+          return {
+            ...gene,
+            exons: transcript ? (exonsByTranscript.get(transcript.id) ?? []) : [],
+          }
+        }).sort((a, b) => a.start - b.start || b.end - a.end)
+        setBounded(nearbyFeatureCache, key, result)
+        return result
+      } catch {
+        return []
       }
-    }).sort((a, b) => a.start - b.start || b.end - a.end)
-    setBounded(nearbyFeatureCache, key, result)
-    return result
-  } catch (err) {
-    if (err.name === 'AbortError') throw err
-    return []
+    })()
+    setBounded(nearbyFeatureRequests, key, request)
+    request.finally(() => {
+      if (nearbyFeatureRequests.get(key) === request) nearbyFeatureRequests.delete(key)
+    })
   }
+  return waitForSharedRequest(request, signal)
 }
 
 export async function fetchVariants({ source, assembly, chrom, start, end }, signal) {
@@ -120,17 +166,51 @@ export async function fetchVariants({ source, assembly, chrom, start, end }, sig
     setBounded(variantCache, key, payload)
     return payload
   }
-  try {
-    const params = new URLSearchParams({ source, assembly, chrom: String(chrom), start: String(start), end: String(end) })
-    const res = await fetch(`/api/genomics/variants?${params}`, { signal })
-    if (!res.ok) throw new Error(String(res.status))
-    const payload = await res.json()
-    if (payload.available) setBounded(variantCache, key, payload)
-    return payload
-  } catch (err) {
-    if (err.name === 'AbortError') throw err
-    return { available: false, variants: [] }
+  let request = variantRequests.get(key)
+  if (!request) {
+    request = (async () => {
+      try {
+        const params = new URLSearchParams({ source, assembly, chrom: String(chrom), start: String(start), end: String(end) })
+        const res = await fetch(`/api/genomics/variants?${params}`)
+        if (!res.ok) throw new Error(String(res.status))
+        const payload = await res.json()
+        if (payload.available) setBounded(variantCache, key, payload)
+        return payload
+      } catch {
+        return { available: false, variants: [] }
+      }
+    })()
+    setBounded(variantRequests, key, request)
+    request.finally(() => {
+      if (variantRequests.get(key) === request) variantRequests.delete(key)
+    })
   }
+  return waitForSharedRequest(request, signal)
+}
+
+export async function fetchGtexExpression(gene, signal) {
+  const key = gene.trim().toUpperCase()
+  if (gtexExpressionCache.has(key)) {
+    const payload = gtexExpressionCache.get(key)
+    setBounded(gtexExpressionCache, key, payload)
+    return payload
+  }
+  let request = gtexExpressionRequests.get(key)
+  if (!request) {
+    const params = new URLSearchParams({ gene: key })
+    request = fetch(`/api/genomics/gtex-expression?${params}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`GTEx request failed (${response.status})`)
+        const payload = await response.json()
+        setBounded(gtexExpressionCache, key, payload)
+        return payload
+      })
+    setBounded(gtexExpressionRequests, key, request)
+    void request.finally(() => {
+      if (gtexExpressionRequests.get(key) === request) gtexExpressionRequests.delete(key)
+    }).catch(() => {})
+  }
+  return waitForSharedRequest(request, signal)
 }
 
 const OFFTARGET_BUSY_RETRIES = 6
@@ -270,7 +350,7 @@ export async function fetchOffTargets({ assembly, pam, guides }, signal, onProgr
   }
 }
 
-export async function fetchAdvancedOffTargets({ assembly, pam, guide }, signal) {
+export async function fetchAdvancedOffTargets({ assembly, pam, guide }, signal, onProgress) {
   const key = offTargetCacheKey(assembly, pam, guide)
   if (advancedOffTargetCache.has(key)) {
     const payload = advancedOffTargetCache.get(key)
@@ -278,7 +358,7 @@ export async function fetchAdvancedOffTargets({ assembly, pam, guide }, signal) 
     return payload
   }
   for (let attempt = 0; attempt <= OFFTARGET_BUSY_RETRIES; attempt += 1) {
-    const response = await fetch('/api/genomics/offtargets-advanced', {
+    const response = await fetch('/api/genomics/offtargets-advanced-stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ assembly, pam, guide }),
@@ -294,7 +374,28 @@ export async function fetchAdvancedOffTargets({ assembly, pam, guide }, signal) 
       try { detail = (await response.json())?.detail ?? detail } catch { /* non-JSON response */ }
       throw new Error(detail)
     }
-    const payload = await response.json()
+    if (!response.body) throw new Error('advanced off-target progress stream is unavailable')
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let payload = null
+    const consumeLine = (line) => {
+      if (!line.trim()) return
+      const event = JSON.parse(line)
+      if (event.type === 'progress') onProgress?.(event)
+      else if (event.type === 'result') payload = event.payload
+      else if (event.type === 'error') throw new Error(event.detail || 'advanced off-target search failed')
+    }
+    while (true) {
+      const { value, done } = await reader.read()
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      lines.forEach(consumeLine)
+      if (done) break
+    }
+    consumeLine(buffer)
+    if (!payload) throw new Error('advanced off-target search ended without a result')
     if (payload.available) setBounded(advancedOffTargetCache, key, payload, 256)
     return payload
   }

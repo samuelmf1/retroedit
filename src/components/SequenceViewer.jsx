@@ -218,7 +218,9 @@ const SequenceViewer = forwardRef(function SequenceViewer(
   const [overviewDragPercent, setOverviewDragPercent] = useState(null)
   const [overviewResizeRange, setOverviewResizeRange] = useState(null)
   const [variantTip, setVariantTip] = useState(null)
-  const broadOverview = Array.isArray(locusOverview?.elements)
+  const nearbyOverview = Array.isArray(locusOverview?.elements)
+  const rangeOverview = nearbyOverview && locusOverview?.resizableWindow === true
+  const broadOverview = nearbyOverview && !rangeOverview
   const dragging = useRef(false)
   const overviewDragging = useRef(false)
   const overviewResizing = useRef(null)
@@ -1158,7 +1160,7 @@ const SequenceViewer = forwardRef(function SequenceViewer(
                 cells.push(
                   <span
                     key={i}
-                    className={`cc p${p}${codonCells.changed[i] ? ' changed' : ''}${codonCells.kind[i] ? ` ${codonCells.kind[i]}` : ''}${codonCells.editTarget?.[i] ? ' editable' : ''}`}
+                    className={`cc p${p}${codonCells.changed[i] ? ' changed' : ''}${codonCells.kind[i] ? ` ${codonCells.kind[i]}` : ''}${codonCells.editTarget?.[i] ? ' editable' : ''}${codonCells.splitEdge?.[i] & 1 ? ' split-left' : ''}${codonCells.splitEdge?.[i] & 2 ? ' split-right' : ''}`}
                     style={{ left: (i - rowStart) * CHAR_W }}
                     title={codonCells.editTarget?.[i]
                       ? `${codonCells.title[i]} · Click to change amino acid`
@@ -1254,7 +1256,9 @@ const SequenceViewer = forwardRef(function SequenceViewer(
             aria-label={`${locusOverview.label}, current window ${formatChrom(reference.chrom)}:${reference.start}-${reference.end}`}
             title={broadOverview
               ? 'Click or drag to move the displayed sequence window. Pinch or use −/+ to change the nearby-region scale.'
-              : 'Click or drag to move the displayed window, pinch or use −/+ to zoom, drag either edge to resize, or click an exon to snap.'}
+              : rangeOverview
+                ? 'Click or drag to move the displayed range, pinch or use −/+ to zoom, or drag either edge to resize.'
+                : 'Click or drag to move the displayed window, pinch or use −/+ to zoom, drag either edge to resize, or click an exon to snap.'}
             onPointerDown={handleOverviewPointerDown}
             onPointerMove={handleOverviewPointerMove}
             onPointerUp={handleOverviewPointerUp}
@@ -1339,9 +1343,13 @@ const SequenceViewer = forwardRef(function SequenceViewer(
             </div>
           )}
           <div className="genomebar-context">
-            <span className="genomebar-kicker">{broadOverview ? 'Nearby genes' : 'Gene overview'}</span>
+            <span className="genomebar-kicker">{nearbyOverview ? 'Nearby genes' : 'Gene overview'}</span>
             <span className="genomebar-hint">
-              {broadOverview ? 'Drag to move · zoom to scale' : 'Drag to move · pinch to zoom · select exon'}
+              {broadOverview
+                ? 'Drag to move · zoom to scale'
+                : rangeOverview
+                  ? 'Drag to move · resize edges · pinch to zoom'
+                  : 'Drag to move · pinch to zoom · select exon'}
             </span>
           </div>
         </div>,

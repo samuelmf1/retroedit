@@ -51,14 +51,17 @@ export function patternToRegexSource(pattern) {
  * Every start index where `pattern` matches, including overlapping matches.
  * Uses a zero-width lookahead so `CCN` finds both hits in `CCCC`.
  */
-export function findPatternIndices(seq, pattern) {
+export function* iteratePatternIndices(seq, pattern) {
   const re = new RegExp(`(?=(${patternToRegexSource(pattern)}))`, 'g')
-  const hits = []
   let m
   while ((m = re.exec(seq)) !== null) {
-    hits.push(m.index)
+    yield m.index
     re.lastIndex = m.index + 1 // lookahead matches are zero-width; advance manually
   }
+}
+
+export function findPatternIndices(seq, pattern) {
+  const hits = [...iteratePatternIndices(seq, pattern)]
   return hits
 }
 

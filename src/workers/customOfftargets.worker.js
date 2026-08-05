@@ -8,12 +8,29 @@ let queue = Promise.resolve()
 const cancelled = new Set()
 const cache = new Map()
 
-const pamMatches = (sequence, start, pattern) => {
-  if (start < 0 || start + pattern.length > sequence.length) return false
-  for (let i = 0; i < pattern.length; i += 1) {
-    if (!IUPAC_SETS[pattern[i]]?.includes(sequence[start + i])) return false
+const BASE_BITS = { A: 1, C: 2, G: 4, T: 8 }
+const patternMasks = (pattern) => [...pattern].map((code) => {
+  let mask = 0
+  for (const base of IUPAC_SETS[code] ?? '') mask |= BASE_BITS[base]
+  return mask
+})
+
+const pamMatches = (sequence, start, masks) => {
+  if (start < 0 || start + masks.length > sequence.length) return false
+  for (let i = 0; i < masks.length; i += 1) {
+    if (!(masks[i] & (BASE_BITS[sequence[start + i]] ?? 0))) return false
   }
   return true
+}
+
+const encodeSeed = (sequence, start) => {
+  let encoded = 0
+  for (let i = 0; i < SEED_SIZE; i += 1) {
+    const bits = BASE_BITS[sequence[start + i]]
+    if (!bits) return -1
+    encoded = (encoded << 2) | (bits === 1 ? 0 : bits === 2 ? 1 : bits === 4 ? 2 : 3)
+  }
+  return encoded
 }
 
 const distance = (a, b) => {
@@ -27,12 +44,14 @@ const distance = (a, b) => {
 const scan = async ({ requestId, pam, guides }) => {
   const normalizedPam = pam.toUpperCase()
   const reversePam = reverseComplementPattern(normalizedPam)
+  const forwardPamMasks = patternMasks(normalizedPam)
+  const reversePamMasks = patternMasks(reversePam)
   const uniqueSpacers = [...new Set(guides.map((guide) => guide.spacer.toUpperCase()))]
   const missing = uniqueSpacers.filter((spacer) => !cache.has(`${normalizedPam}|${spacer}`))
   const seedIndex = new Map()
   missing.forEach((spacer, guideIndex) => {
     for (let offset = 0; offset < spacer.length; offset += SEED_SIZE) {
-      const key = `${offset}:${spacer.slice(offset, offset + SEED_SIZE)}`
+      const key = (offset / SEED_SIZE) * 1024 + encodeSeed(spacer, offset)
       const list = seedIndex.get(key) ?? []
       list.push(guideIndex)
       seedIndex.set(key, list)
@@ -47,10 +66,11 @@ const scan = async ({ requestId, pam, guides }) => {
   let nextYield = 250_000
 
   const consider = (spacer, record, protoStart, strand, pamSeq) => {
-    if (!/^[ACGT]{20}$/.test(spacer)) return
     stamp += 1
     for (let offset = 0; offset < 20; offset += SEED_SIZE) {
-      const candidates = seedIndex.get(`${offset}:${spacer.slice(offset, offset + SEED_SIZE)}`)
+      const encoded = encodeSeed(spacer, offset)
+      if (encoded < 0) return
+      const candidates = seedIndex.get((offset / SEED_SIZE) * 1024 + encoded)
       if (!candidates) continue
       for (const guideIndex of candidates) {
         if (seen[guideIndex] === stamp) continue
@@ -70,11 +90,11 @@ const scan = async ({ requestId, pam, guides }) => {
     const sequence = record.seq
     for (let pamStart = 0; pamStart <= sequence.length - normalizedPam.length; pamStart += 1) {
       if (cancelled.has(requestId)) throw new DOMException('Cancelled', 'AbortError')
-      if (pamStart >= 20 && pamMatches(sequence, pamStart, normalizedPam)) {
+      if (pamStart >= 20 && pamMatches(sequence, pamStart, forwardPamMasks)) {
         consider(sequence.slice(pamStart - 20, pamStart), record, pamStart - 20, '+', sequence.slice(pamStart, pamStart + normalizedPam.length))
       }
       const reverseProtoStart = pamStart + normalizedPam.length
-      if (reverseProtoStart + 20 <= sequence.length && pamMatches(sequence, pamStart, reversePam)) {
+      if (reverseProtoStart + 20 <= sequence.length && pamMatches(sequence, pamStart, reversePamMasks)) {
         consider(reverseComplement(sequence.slice(reverseProtoStart, reverseProtoStart + 20)), record, reverseProtoStart, '-', reverseComplement(sequence.slice(pamStart, pamStart + normalizedPam.length)))
       }
       if (completed + pamStart >= nextYield) {

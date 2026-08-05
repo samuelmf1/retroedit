@@ -1,8 +1,8 @@
 // SpCas9 sgRNA discovery around edited positions.
 
 import {
-  findPatternIndices,
   gcFraction,
+  iteratePatternIndices,
   reverseComplement,
   reverseComplementPattern,
 } from './bio.js'
@@ -119,16 +119,20 @@ export function findGuides({
   const sortedEdits = affected == null ? [] : [...affected].sort((a, b) => a - b)
   const allGuides = affected == null
 
-  // Prefix sum over "is within windowBp of an edit" so span tests are O(1).
-  const mask = new Uint8Array(n)
-  for (const a of sortedEdits) {
-    const lo = Math.max(0, a - windowBp)
-    const hi = Math.min(n - 1, a + windowBp)
-    for (let i = lo; i <= hi; i++) mask[i] = 1
+  // The full guide catalog is the common path and does not need an edit mask.
+  // Build the O(sequence length) prefix data only for direct edit-filtered calls.
+  let spanNearEdit = null
+  if (!allGuides) {
+    const mask = new Uint8Array(n)
+    for (const a of sortedEdits) {
+      const lo = Math.max(0, a - windowBp)
+      const hi = Math.min(n - 1, a + windowBp)
+      for (let i = lo; i <= hi; i++) mask[i] = 1
+    }
+    const prefix = new Int32Array(n + 1)
+    for (let i = 0; i < n; i++) prefix[i + 1] = prefix[i] + mask[i]
+    spanNearEdit = (s, e) => prefix[e + 1] - prefix[s] > 0
   }
-  const prefix = new Int32Array(n + 1)
-  for (let i = 0; i < n; i++) prefix[i + 1] = prefix[i] + mask[i]
-  const spanNearEdit = (s, e) => prefix[e + 1] - prefix[s] > 0
 
   const rs3Ok = rs3Compatible(pam, spacerLength)
   const guides = []
@@ -188,7 +192,7 @@ export function findGuides({
   }
 
   // Forward strand: PAM sits immediately 3' of the protospacer.
-  for (const pamStart of findPatternIndices(seq, pam)) {
+  for (const pamStart of iteratePatternIndices(seq, pam)) {
     const protoStart = pamStart - spacerLength
     if (protoStart < 0) continue
     push({
@@ -203,7 +207,7 @@ export function findGuides({
 
   // Reverse strand: scan the forward sequence for the reverse-complemented PAM,
   // which places the PAM to the *left* of the protospacer in forward coords.
-  for (const pamStart of findPatternIndices(seq, reverseComplementPattern(pam))) {
+  for (const pamStart of iteratePatternIndices(seq, reverseComplementPattern(pam))) {
     const protoStart = pamStart + pamLen
     const protoEnd = protoStart + spacerLength - 1
     if (protoEnd >= n) continue

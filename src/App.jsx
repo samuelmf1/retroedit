@@ -1,8 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import Controls from './components/Controls.jsx'
-import EditBar from './components/EditBar.jsx'
-import FeatureRibbon, { DEFAULT_GNOMAD_MAF } from './components/FeatureRibbon.jsx'
 import {
   DEFAULT_PAM,
   DEFAULT_SPACER_LENGTH,
@@ -35,8 +33,10 @@ import { CODON_TABLE, buildCodonTrack, codonAt, codonsForAminoAcid } from './lib
 import { complementBase, findPatternIndices, reverseComplement } from './lib/bio.js'
 import { cachedOffTargets, fetchCanonicalExons, fetchNearbyFeatures, fetchOffTargets, fetchSpacerMatches, fetchVariants, genomicsStatus } from './lib/genomics.js'
 import { fetchCustomOffTargets, setCustomOffTargetReference } from './lib/customOfftargets.js'
-import { clinvarCategory } from './lib/variants.js'
+import { clinvarCategory, DEFAULT_GNOMAD_MAF } from './lib/variants.js'
 import { buildSnapGeneFile, isSnapGeneBuffer, parseSnapGeneFile } from './lib/snapgene.js'
+import { buildGenBankFile } from './lib/genbank.js'
+import { assemblePlasmid, loadPlasmidTemplate } from './lib/plasmid.js'
 
 const DEFAULT_VIEW_OPTS = {
   featureLevels: { gene: true, transcript: false },
@@ -65,10 +65,18 @@ const DEFAULT_SHORT_ARM = DEFAULT_ARM_TOTAL - DEFAULT_LONG_ARM
 const loadGuideTable = () => import('./components/GuideTable.jsx')
 const loadDonorPanel = () => import('./components/DonorPanel.jsx')
 const loadSequenceViewer = () => import('./components/SequenceViewer.jsx')
+const loadEditBar = () => import('./components/EditBar.jsx')
+const loadFeatureRibbon = () => import('./components/FeatureRibbon.jsx')
+const loadProteinStructureModal = () => import('./components/ProteinStructureModal.jsx')
 const GuideTable = lazy(loadGuideTable)
 const DonorPanel = lazy(loadDonorPanel)
 const SequenceViewer = lazy(loadSequenceViewer)
-const preloadWorkspace = () => Promise.all([loadGuideTable(), loadDonorPanel(), loadSequenceViewer()])
+const EditBar = lazy(loadEditBar)
+const FeatureRibbon = lazy(loadFeatureRibbon)
+const ProteinStructureModal = lazy(loadProteinStructureModal)
+const preloadWorkspace = () => Promise.all([
+  loadGuideTable(), loadDonorPanel(), loadSequenceViewer(), loadEditBar(), loadFeatureRibbon(),
+])
 
 const AMINO_ACID_NAMES = {
   A: 'Alanine', C: 'Cysteine', D: 'Aspartate', E: 'Glutamate', F: 'Phenylalanine',
@@ -79,6 +87,25 @@ const AMINO_ACID_NAMES = {
 
 const FEATURE_COLOR_PRESETS = ['#2f6fed', '#7c3aed', '#0f9d76', '#d97706', '#dc3a30', '#db2777', '#526b7b']
 const DESIGN_PAIR_COLORS = ['#2f6fed', '#0f9d76', '#d97706', '#7c3aed', '#db2777', '#0072b2', '#e69f00', '#009e73']
+
+function proteinResidueForGenomic(codingSegments, strand, genomicPosition) {
+  if (!Number.isInteger(genomicPosition) || !codingSegments?.length) return null
+  const segments = [...codingSegments].sort((a, b) => (
+    strand === -1 ? b.end - a.end : a.start - b.start
+  ))
+  let codingOffset = 0
+  for (const segment of segments) {
+    const length = segment.end - segment.start + 1
+    if (genomicPosition >= segment.start && genomicPosition <= segment.end) {
+      const withinSegment = strand === -1
+        ? segment.end - genomicPosition
+        : genomicPosition - segment.start
+      return Math.floor((codingOffset + withinSegment) / 3) + 1
+    }
+    codingOffset += length
+  }
+  return null
+}
 
 function CustomFeatureDialog({ draft, onClose, onApply }) {
   const editing = Boolean(draft.id)
@@ -200,7 +227,7 @@ function AminoAcidEditDialog({ edit, onClose, onApply }) {
           <div className="aaeditchoices">
             <div className="aaeditrecommendation">
               <strong>Codon options</strong>
-              <span>Recommended: <code>{recommendedCodon}</code> · {choices[0].distance} nucleotide {choices[0].distance === 1 ? 'change' : 'changes'}</span>
+              <span>Human-optimized recommendation: <code>{recommendedCodon}</code> · {choices[0].humanUsage.toFixed(1)} per 1,000 codons</span>
             </div>
             <div className="aaeditcodons" role="radiogroup" aria-label={`All codons encoding ${AMINO_ACID_NAMES[aminoAcid]}`}>
               {choices.map((choice) => (
@@ -209,7 +236,7 @@ function AminoAcidEditDialog({ edit, onClose, onApply }) {
                   type="button"
                   role="radio"
                   aria-checked={selectedCodon === choice.codon}
-                  aria-label={`${choice.codon}, ${choice.distance} nucleotide ${choice.distance === 1 ? 'change' : 'changes'}${choice.codon === recommendedCodon ? ', recommended' : ''}`}
+                  aria-label={`${choice.codon}, human usage ${choice.humanUsage.toFixed(1)} per 1,000 codons, ${choice.distance} nucleotide ${choice.distance === 1 ? 'change' : 'changes'}${choice.codon === recommendedCodon ? ', human-optimized recommendation' : ''}`}
                   className={`${selectedCodon === choice.codon ? 'selected ' : ''}${choice.codon === recommendedCodon ? 'recommended' : ''}`.trim()}
                   onClick={() => setChosenCodon(choice.codon)}
                 >
@@ -218,7 +245,10 @@ function AminoAcidEditDialog({ edit, onClose, onApply }) {
                       <span key={index} className={base !== choice.codon[index] ? 'changed' : ''}>{choice.codon[index]}</span>
                     ))}
                   </span>
-                  <small>{choice.codon === recommendedCodon ? 'Recommended' : `${choice.distance} ${choice.distance === 1 ? 'edit' : 'edits'}`}</small>
+                  <small className="aaeditusage">
+                    {choice.codon === recommendedCodon && <strong>Human preferred</strong>}
+                    <span>{choice.humanUsage.toFixed(1)} / 1k · {choice.distance} {choice.distance === 1 ? 'edit' : 'edits'}</span>
+                  </small>
                 </button>
               ))}
             </div>
@@ -393,6 +423,7 @@ export default function App() {
 
   const [spacerMatchDialog, setSpacerMatchDialog] = useState(null)
   const [aminoAcidEdit, setAminoAcidEdit] = useState(null)
+  const [proteinStructureOpen, setProteinStructureOpen] = useState(false)
   const [featureDraft, setFeatureDraft] = useState(null)
   const [customFeatures, setCustomFeatures] = useState([])
   const [loadConfirmOpen, setLoadConfirmOpen] = useState(false)
@@ -442,9 +473,19 @@ export default function App() {
   const initialLocationLoadedRef = useRef(false)
   const [overviewTarget, setOverviewTarget] = useState(null)
 
-  useEffect(() => { checkRs3Health().then(setRs3Status) }, [])
+  useEffect(() => {
+    const loadCapabilities = () => {
+      checkRs3Health().then(setRs3Status)
+      genomicsStatus().then(setGStatus)
+    }
+    if (typeof window.requestIdleCallback === 'function') {
+      const id = window.requestIdleCallback(loadCapabilities, { timeout: 1200 })
+      return () => window.cancelIdleCallback(id)
+    }
+    const id = window.setTimeout(loadCapabilities, 200)
+    return () => window.clearTimeout(id)
+  }, [])
   useEffect(() => { window.sessionStorage.setItem("retroedit-sequence-line-mode", sequenceLineMode) }, [sequenceLineMode])
-  useEffect(() => { genomicsStatus().then(setGStatus) }, [])
 
   const requestLoadConfirmation = useCallback((copy = null) => new Promise((resolve) => {
     loadConfirmResolverRef.current?.(false)
@@ -507,6 +548,10 @@ export default function App() {
     const loadController = new AbortController()
     loadAbortRef.current = loadController
     let selectedSpacerMatch = opts.spacerMatch ?? null
+    // Capability requests share their in-flight promises with the idle warm-up,
+    // so an immediate user action never waits for the idle callback.
+    checkRs3Health().then(setRs3Status)
+    genomicsStatus().then(setGStatus)
     void preloadWorkspace()
     setLoading(true)
     setError(null)
@@ -1141,10 +1186,17 @@ export default function App() {
     const guides = guidesNearEdits(allGuides, affectedRef, DEFAULT_WINDOW_BP)
 
     const nearMask = new Uint8Array(edited.length)
+    const nearDelta = new Int32Array(edited.length + 1)
     for (const a of affectedDisp) {
       const lo = Math.max(0, a - DEFAULT_WINDOW_BP)
       const hi = Math.min(edited.length - 1, a + DEFAULT_WINDOW_BP)
-      for (let i = lo; i <= hi; i++) nearMask[i] = 1
+      nearDelta[lo] += 1
+      nearDelta[hi + 1] -= 1
+    }
+    let overlappingRanges = 0
+    for (let i = 0; i < edited.length; i += 1) {
+      overlappingRanges += nearDelta[i]
+      if (overlappingRanges > 0) nearMask[i] = 1
     }
 
     return {
@@ -1315,24 +1367,43 @@ export default function App() {
     return () => controller.abort()
   }, [metricGuideCandidates, scorable, rs3Status.rs3])
 
-  // Merge both scores and use the table-selected model for recommended order and viewer color.
-  const guideView = useMemo(() => {
-    if (!derived || !region) return { items: [], sorted: [] }
+  // Geometry and edit-specific disruption plans are stable while asynchronous
+  // scores/off-target batches arrive. Keep them out of the live metric merge so
+  // those updates do not repeat codon analysis for every visible guide.
+  const guideGeometry = useMemo(() => {
+    if (!derived || !region) return []
     const { dispStart, dispEnd } = derived
-    const items = visibleGuideCandidates.map((g) => {
-      const rs3Hsu = g.context30 ? cachedScore(g.context30, 'Hsu2013') : undefined
-      const rs3Chen = g.context30 ? cachedScore(g.context30, 'Chen2013') : undefined
-      const score = rs3Model === 'chen2013' ? rs3Chen : rs3Hsu
+    return visibleGuideCandidates.map((g) => {
       const cutDS = g.cutBefore < refSeq.length ? dispStart[g.cutBefore] : edited.length
       const protoDS = dispStart[g.protoStart]
       const protoDE = dispEnd[g.protoEnd]
       const pamDS = dispStart[g.pamStart]
       const pamDE = dispEnd[g.pamEnd]
-      const offtarget = offTargets.byGuide[g.id]
       const blocking = exploringGuides ? null : planGuideBlock({
         refSeq, guide: g, pam, frame, affected: derived.affectedRef,
         blockingChoice: blockChoiceMap[g.id] ?? null,
       })
+      return {
+        ...g,
+        blocking,
+        chrom: region.reference.chrom,
+        protoGenomic: region.reference.start + g.protoStart,
+        cutGenomic: region.reference.start + g.cutBefore,
+        protoDS, protoDE, pamDS, pamDE, cutDS,
+        ds: Math.min(protoDS, pamDS),
+        de: Math.max(protoDE, pamDE),
+      }
+    })
+  }, [derived, region, visibleGuideCandidates, refSeq, edited.length, exploringGuides, pam, frame, blockChoiceMap])
+
+  // Merge both scores and use the table-selected model for recommended order and viewer color.
+  const guideView = useMemo(() => {
+    if (!derived || !region) return { items: [], sorted: [] }
+    const items = guideGeometry.map((g) => {
+      const rs3Hsu = g.context30 ? cachedScore(g.context30, 'Hsu2013') : undefined
+      const rs3Chen = g.context30 ? cachedScore(g.context30, 'Chen2013') : undefined
+      const score = rs3Model === 'chen2013' ? rs3Chen : rs3Hsu
+      const offtarget = offTargets.byGuide[g.id]
       return {
         ...g,
         rs3: typeof score === 'number' ? score : undefined,
@@ -1350,20 +1421,13 @@ export default function App() {
         fill: rs3Fill(score),
         lightText: rs3NeedsLightText(score),
         offtarget,
-        blocking,
         offUnique: offtarget ? offtarget.unique : undefined,
-        chrom: region.reference.chrom,
-        protoGenomic: region.reference.start + g.protoStart,
-        cutGenomic: region.reference.start + g.cutBefore,
-        protoDS, protoDE, pamDS, pamDE, cutDS,
-        ds: Math.min(protoDS, pamDS),
-        de: Math.max(protoDE, pamDE),
       }
     })
     const sorted = [...items].sort(compareGuides)
     return { items, sorted }
     // scoreVersion re-reads the RS3 cache after async scores land.
-  }, [derived, region, rs3Model, refSeq, edited.length, scoreVersion, offTargets, pam, frame, blockChoiceMap, rs3Status, gStatus, scorable, visibleGuideCandidates, exploringGuides]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [derived, region, guideGeometry, rs3Model, scoreVersion, offTargets, rs3Status, gStatus, scorable, isCustomRegion]) // eslint-disable-line react-hooks/exhaustive-deps
 
 
   const biotypes = useMemo(() => (region ? biotypesPresent(region.features) : []), [region])
@@ -1487,6 +1551,11 @@ export default function App() {
     }
   }, [region?.reference.assembly, region?.reference.chrom, region?.reference.gene, region?.focus?.start, region?.focus?.end, overviewHalfSpan])
 
+  const explicitCoordinateRange = useMemo(() => (
+    /^(?:chr)?(?:[1-9]|1\d|2[0-2]|X|Y):[\d,]+\s*[-–]\s*[\d,]+$/i
+      .test(loadedControls?.query?.trim() ?? '')
+  ), [loadedControls?.query])
+
   const locusOverview = useMemo(() => {
     if (isCustomRegion) return null
     if (!region) return null
@@ -1517,8 +1586,9 @@ export default function App() {
       label: `chr${String(region.reference.chrom).replace(/^chr/i, '')}:${center.toLocaleString()} ±${spanLabel}`,
       exons: [],
       elements: nearbyFeatures,
+      resizableWindow: explicitCoordinateRange,
     }
-  }, [region, exonNav, nearbyFeatures, overviewHalfSpan])
+  }, [region, exonNav, nearbyFeatures, overviewHalfSpan, explicitCoordinateRange])
 
   const zoomNearbyOverview = useCallback((factor) => {
     setOverviewHalfSpan((current) => Math.max(
@@ -1536,6 +1606,7 @@ export default function App() {
     const parity = new Int8Array(edited.length).fill(-1)
     const aa = new Array(edited.length).fill(null)
     const changed = new Uint8Array(edited.length)
+    const splitEdge = new Uint8Array(edited.length)
     const title = new Array(edited.length).fill('')
     const kind = new Array(edited.length).fill('')
     const editTarget = new Array(edited.length).fill(null)
@@ -1549,7 +1620,10 @@ export default function App() {
       const rec = edited[d]
       if (rec.ref == null) continue
       recordByRef[rec.ref] = rec
-      if (track.pos[rec.ref] >= 0) parity[d] = track.parity[rec.ref]
+      if (track.pos[rec.ref] >= 0) {
+        parity[d] = track.parity[rec.ref]
+        splitEdge[d] = track.splitEdge?.[rec.ref] ?? 0
+      }
     }
     const deletionSpans = []
     const largeDeletionMask = new Uint8Array(edited.length)
@@ -1613,10 +1687,16 @@ export default function App() {
             refIdx: codon.refIdx,
             displayIdx: codon.refIdx.map((idx) => derived.dispStart[idx]),
             referenceCodon: codon.codon,
+            referenceAa: codon.aa,
             currentCodon: editedCodon,
             currentAa: editedAa,
             strand: frame.strand,
             transcript: frameLabel,
+            residueNumber: proteinResidueForGenomic(
+              exonNav?.coding,
+              exonNav?.transcript?.strand ?? frame.strand,
+              region.reference.start + codon.refIdx[1],
+            ),
           }
         }
         effectTitle = editedCodon === codon.codon
@@ -1627,6 +1707,9 @@ export default function App() {
       }
 
       effectTitle = frameLabel ? `${frameLabel} · ${effectTitle}` : effectTitle
+      if (codon.refIdx.some((idx, i) => i > 0 && Math.abs(idx - codon.refIdx[i - 1]) > 1)) {
+        effectTitle += ' · split codon across exon junction'
+      }
 
       const codonChanged = records.some(
         (rec, i) => !rec || rec.del || rec.base !== refSeq[codon.refIdx[i]],
@@ -1660,8 +1743,72 @@ export default function App() {
       d = end
     }
 
-    return { parity, aa, changed, title, kind, editTarget, deletionSpans, largeDeletionMask }
-  }, [region, derived, refSeq, edited, frame])
+    return { parity, aa, changed, splitEdge, title, kind, editTarget, deletionSpans, largeDeletionMask }
+  }, [region, derived, refSeq, edited, frame, exonNav])
+
+  const proteinMutationResidues = useMemo(() => {
+    if (!region || !derived?.edits || !exonNav?.coding?.length || !frame) return []
+    const strand = exonNav.transcript?.strand ?? frame.strand
+    const byPosition = new Map()
+    const addResidue = (position, update = {}) => {
+      if (!Number.isInteger(position) || position < 1) return
+      byPosition.set(position, { position, ...(byPosition.get(position) ?? {}), ...update })
+    }
+
+    edited.forEach((record, displayIndex) => {
+      if (record.ref != null) {
+        if (!record.del && record.base === refSeq[record.ref]) return
+        const position = proteinResidueForGenomic(
+          exonNav.coding, strand, region.reference.start + record.ref,
+        )
+        if (position) addResidue(position, record.del ? { alternateAa: 'Δ' } : {})
+        return
+      }
+
+      // Insertions have no reference coordinate. Anchor them to the adjacent
+      // coding residue so the structure view still focuses the affected site.
+      let neighbour = null
+      for (let i = displayIndex - 1; i >= 0; i -= 1) {
+        if (edited[i].ref != null) { neighbour = edited[i].ref; break }
+      }
+      if (neighbour == null) {
+        for (let i = displayIndex + 1; i < edited.length; i += 1) {
+          if (edited[i].ref != null) { neighbour = edited[i].ref; break }
+        }
+      }
+      if (neighbour != null) {
+        const codon = codonAt(frame, refSeq, neighbour)
+        addResidue(proteinResidueForGenomic(
+          exonNav.coding, strand, region.reference.start + neighbour,
+        ), { referenceAa: codon?.aa, alternateAa: 'ins' })
+      }
+    })
+
+    codonCells?.editTarget?.forEach((target) => {
+      if (!target?.residueNumber || target.currentCodon === target.referenceCodon) return
+      addResidue(target.residueNumber, {
+        referenceAa: target.referenceAa,
+        alternateAa: target.currentAa,
+      })
+    })
+
+    // Recover reference amino acids for deleted codons when possible.
+    edited.forEach((record) => {
+      if (!record.del || record.ref == null) return
+      const codon = codonAt(frame, refSeq, record.ref)
+      const position = proteinResidueForGenomic(
+        exonNav.coding, strand, region.reference.start + record.ref,
+      )
+      if (position && codon?.aa) addResidue(position, {
+        referenceAa: codon.aa,
+        alternateAa: 'Δ',
+      })
+    })
+
+    return [...byPosition.values()].sort((a, b) => a.position - b.position)
+  }, [codonCells, derived?.edits, edited, exonNav, frame, refSeq, region])
+
+  const proteinStructureGene = exonNav?.gene?.name ?? region?.reference?.gene?.name ?? ''
 
   const detectedCodingFeatures = useMemo(() => {
     if (!codonCells) return []
@@ -1790,17 +1937,32 @@ export default function App() {
       .filter((v) => v.source === 'gnomad' && (v.af ?? 0) >= MAF_WARN)
       .sort((a, b) => a.refIdx - b.refIdx)
     if (!common.length) return {}
+    const firstAtOrAfter = (position) => {
+      let lo = 0
+      let hi = common.length
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1
+        if (common[mid].refIdx < position) lo = mid + 1
+        else hi = mid
+      }
+      return lo
+    }
     const out = {}
     for (const g of visibleGuideCandidates) {
-      const hits = common.filter((v) => v.refIdx >= g.protoStart && v.refIdx <= g.pamEnd)
+      const hits = []
+      for (let i = firstAtOrAfter(g.start); i < common.length; i += 1) {
+        const variant = common[i]
+        if (variant.refIdx > g.end) break
+        hits.push(variant)
+      }
       if (!hits.length) continue
       const hit = hits.reduce((highest, current) => current.af > highest.af ? current : highest)
       out[g.id] = {
         af: hit.af, pos: hit.pos, id: hit.id, ref: hit.ref, alt: hit.alt,
-        inPam: hit.refIdx >= g.pamStart, count: hits.length,
+        inPam: hit.refIdx >= g.pamStart && hit.refIdx <= g.pamEnd, count: hits.length,
         variants: hits.map((v) => ({
           af: v.af, pos: v.pos, id: v.id, ref: v.ref, alt: v.alt,
-          inPam: v.refIdx >= g.pamStart,
+          inPam: v.refIdx >= g.pamStart && v.refIdx <= g.pamEnd,
         })),
       }
     }
@@ -2141,7 +2303,7 @@ export default function App() {
     librarySignatures[selectedGuide.id] !== librarySignatureFor(selectedGuide.id)
   )
 
-  const exportGuides = useCallback((format, options = {}) => {
+  const exportGuides = useCallback(async (format, options = {}) => {
     if (!region || !derived || hasInvalidEditedBases) return
     const chosen = guideView.sorted.filter((g) => g.metricsReady && checked.has(g.id))
     if (!chosen.length) return
@@ -2178,7 +2340,7 @@ export default function App() {
 
     const exportStem = `retroedit_${exportFilenameToken(loadedControls?.query ?? query)}_${exportFilenameToken(pam)}`
     const csvCell = (value) => `"${String(value ?? '').replaceAll('"', '""')}"`
-    if (format === 'dna') {
+    if (format === 'dna' || format === 'gbk') {
       const sequence = edited.filter((record) => !record.del).map((record) => record.base).join('')
       if (!sequence) return
 
@@ -2248,16 +2410,18 @@ export default function App() {
         ].filter(Boolean)
       })
 
-      const file = buildSnapGeneFile({
+      const exportRecord = {
         name: `RetroEdit designs · ${loadedControls?.query ?? query}`,
         sequence,
         features: [...editFeatures, ...annotationFeatures, ...designFeatures],
         circular: false,
-      })
-      const url = URL.createObjectURL(new Blob([file], { type: 'application/octet-stream' }))
+      }
+      const file = format === 'gbk' ? buildGenBankFile(exportRecord) : buildSnapGeneFile(exportRecord)
+      const mimeType = format === 'gbk' ? 'text/plain;charset=utf-8' : 'application/octet-stream'
+      const url = URL.createObjectURL(new Blob([file], { type: mimeType }))
       const anchor = document.createElement('a')
       anchor.href = url
-      anchor.download = `${exportStem}_designs.dna`
+      anchor.download = `${exportStem}_designs.${format}`
       anchor.click()
       URL.revokeObjectURL(url)
       return
@@ -2280,19 +2444,33 @@ export default function App() {
       mimeType = 'text/csv'
     } else if (format === 'idt-cloning') {
       const topOverhang = String(options.topOverhang ?? '').toUpperCase()
+      const topThreePrimeOverhang = String(options.topThreePrimeOverhang ?? '').toUpperCase()
       const bottomOverhang = String(options.bottomOverhang ?? '').toUpperCase()
+      const bottomThreePrimeOverhang = String(options.bottomThreePrimeOverhang ?? '').toUpperCase()
       const includeBottom = options.includeBottom !== false
       const namePattern = String(options.namePattern || '{guide}_{strand}')
+      const scale = String(options.scale ?? '')
+      const purification = String(options.purification ?? '')
       const oligoName = (row, index, strand) => namePattern
         .replaceAll('{guide}', row.id)
         .replaceAll('{index}', String(index + 1))
         .replaceAll('{strand}', strand)
       text = [
-        ['Name', 'Sequence'],
+        ['Name', 'Sequence', 'Scale', 'Purification'],
         ...rows.flatMap((r, index) => {
-          const oligos = [[oligoName(r, index, 'top'), `${topOverhang}${r.spacer}`]]
+          const oligos = [[
+            oligoName(r, index, 'top'),
+            `${topOverhang}${r.spacer}${topThreePrimeOverhang}`,
+            scale,
+            purification,
+          ]]
           if (includeBottom) {
-            oligos.push([oligoName(r, index, 'bottom'), `${bottomOverhang}${reverseComplement(r.spacer)}`])
+            oligos.push([
+              oligoName(r, index, 'bottom'),
+              `${bottomOverhang}${reverseComplement(r.spacer)}${bottomThreePrimeOverhang}`,
+              scale,
+              purification,
+            ])
           }
           return oligos
         }),
@@ -2302,9 +2480,23 @@ export default function App() {
     } else if (format === 'idt-gblocks') {
       const donorRows = rows.filter((r) => r.repair_template)
       if (!donorRows.length) return
+      const template = await loadPlasmidTemplate()
+      const fivePrimeOverhang = String(options.fivePrimeOverhang ?? '').toUpperCase()
+      const threePrimeOverhang = String(options.threePrimeOverhang ?? '').toUpperCase()
+      const namePattern = String(options.namePattern || '{guide}_pWB366')
+      const gBlockName = (row, index) => namePattern
+        .replaceAll('{guide}', row.id)
+        .replaceAll('{index}', String(index + 1))
+      const gBlocks = donorRows.map((row, index) => {
+        const scaffoldSequence = row.sgRNA.slice(row.spacer.length)
+        const construct = assemblePlasmid(
+          template, row.spacer, scaffoldSequence, row.sgRNA_scaffold, row.repair_template,
+        )
+        return [gBlockName(row, index), `${fivePrimeOverhang}${construct.sequence}${threePrimeOverhang}`]
+      })
       text = [
         ['Name', 'Sequence'],
-        ...donorRows.map((r) => [`${r.id}_repair_template_${r.repair_template_strand}`, r.repair_template]),
+        ...gBlocks,
       ].map((row) => row.map(csvCell).join(',')).join('\n') + '\n'
       filename = `${exportStem}_IDT_gBlocks.csv`
       mimeType = 'text/csv'
@@ -2322,7 +2514,7 @@ export default function App() {
     URL.revokeObjectURL(url)
   }, [region, derived, guideView.sorted, checked, rs3Model, refSeq, edited, pam, frame, armsFor, orientation, blockChoiceMap, loadedControls, query, hasInvalidEditedBases, displayedFeatureItems])
 
-  const exportAnnotatedSnapGene = useCallback(() => {
+  const exportAnnotatedSequenceFile = useCallback((format) => {
     if (!region || !derived || hasInvalidEditedBases) return
     const sequence = edited.filter((record) => !record.del).map((record) => record.base).join('')
     if (!sequence) return
@@ -2373,16 +2565,18 @@ export default function App() {
         source: feature.source,
       }]
     })
-    const file = buildSnapGeneFile({
+    const exportRecord = {
       name: `RetroEdit ${loadedControls?.query ?? query}`,
       sequence,
       features: [...editFeatures, ...annotationFeatures],
       circular: false,
-    })
-    const url = URL.createObjectURL(new Blob([file], { type: 'application/octet-stream' }))
+    }
+    const file = format === 'gbk' ? buildGenBankFile(exportRecord) : buildSnapGeneFile(exportRecord)
+    const mimeType = format === 'gbk' ? 'text/plain;charset=utf-8' : 'application/octet-stream'
+    const url = URL.createObjectURL(new Blob([file], { type: mimeType }))
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `retroedit_${exportFilenameToken(loadedControls?.query ?? query)}_annotated.dna`
+    anchor.download = `retroedit_${exportFilenameToken(loadedControls?.query ?? query)}_annotated.${format}`
     anchor.click()
     URL.revokeObjectURL(url)
   }, [region, derived, hasInvalidEditedBases, edited, displayedFeatureItems, loadedControls, query])
@@ -2675,6 +2869,17 @@ export default function App() {
         />
       )}
 
+      {proteinStructureOpen && proteinStructureGene && proteinMutationResidues.length > 0 && (
+        <Suspense fallback={<div className="proteinmodal proteinchunkloading" role="status">Preparing structure viewer…</div>}>
+          <ProteinStructureModal
+            gene={proteinStructureGene}
+            assembly={region?.reference?.assembly}
+            residues={proteinMutationResidues}
+            onClose={() => setProteinStructureOpen(false)}
+          />
+        </Suspense>
+      )}
+
       {loadConfirmOpen && (
         <div
           className="spacermatchbackdrop"
@@ -2805,7 +3010,8 @@ export default function App() {
                 onRevert={revert}
                 onEditFocus={focusEditInViewer}
                 customFeatureCount={customFeatureItems.length + derived.editList.length}
-                onDownloadSnapGene={exportAnnotatedSnapGene}
+                onDownloadSnapGene={() => exportAnnotatedSequenceFile('dna')}
+                onDownloadGenBank={() => exportAnnotatedSequenceFile('gbk')}
                 snapGeneDisabled={hasInvalidEditedBases}
                 annotationOptions={viewOpts}
                 onAnnotationChange={setViewOpts}
@@ -2829,6 +3035,8 @@ export default function App() {
                 sequenceMatchIndex={sequenceMatchIndex}
                 onPreviousSequenceMatch={() => stepSequenceMatch(-1)}
                 onNextSequenceMatch={() => stepSequenceMatch(1)}
+                proteinMutationCount={proteinMutationResidues.length}
+                onOpenProteinStructure={() => setProteinStructureOpen(true)}
               />
               {hasInvalidEditedBases && (
                 <div className="sequencevalidation" role="alert">

@@ -39,21 +39,25 @@ export function hasEdits(refSeq, edited) {
  */
 export function affectedRefIndices(refSeq, edited) {
   const affected = new Set()
+  let previousRef = null
+  let d = 0
 
-  for (const rec of edited) {
-    if (rec.ref == null) continue
-    if (rec.del || refSeq[rec.ref] !== rec.base) affected.add(rec.ref)
-  }
-  // Insertions have no reference index of their own; charge them to the bases
-  // on either side of the junction.
-  for (let d = 0; d < edited.length; d++) {
-    if (edited[d].ref != null) continue
-    for (let l = d - 1; l >= 0; l--) {
-      if (edited[l].ref != null) { affected.add(edited[l].ref); break }
+  while (d < edited.length) {
+    const rec = edited[d]
+    if (rec.ref != null) {
+      if (rec.del || refSeq[rec.ref] !== rec.base) affected.add(rec.ref)
+      previousRef = rec.ref
+      d += 1
+      continue
     }
-    for (let r = d + 1; r < edited.length; r++) {
-      if (edited[r].ref != null) { affected.add(edited[r].ref); break }
-    }
+
+    // Charge one contiguous insertion to its two junction bases once. The old
+    // per-base neighbour scan became quadratic for long pasted insertions.
+    if (previousRef != null) affected.add(previousRef)
+    let next = d + 1
+    while (next < edited.length && edited[next].ref == null) next += 1
+    if (next < edited.length) affected.add(edited[next].ref)
+    d = next
   }
 
   return [...affected].sort((a, b) => a - b)
